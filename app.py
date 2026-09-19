@@ -3,20 +3,141 @@ MC Capacity vs Order — Week-Wise Report
 Streamlit app: upload OSR + Production Register → download generated report
 """
 
+import base64
 import datetime
 import io
 import pathlib
 
 import streamlit as st
+from PIL import Image
 
 from report_generator import generate_report
 
 # ── Page config ────────────────────────────────────────────────────────────────
+ASSETS_DIR = pathlib.Path(__file__).parent / "assets"
+LOGO_PATH  = ASSETS_DIR / "jay_logo.jpg"
+_logo_img  = Image.open(LOGO_PATH) if LOGO_PATH.exists() else "📦"
+
 st.set_page_config(
     page_title="MC Capacity vs Order Report",
-    page_icon="📦",
-    layout="centered",
+    page_icon=_logo_img,
+    layout="wide",
 )
+
+# ── JAY brand theme (black / gold, from the JAY logo) ───────────────────────────
+JAY_GOLD        = "#F2B90C"
+JAY_GOLD_LIGHT  = "#FFDE7A"
+JAY_GOLD_DARK   = "#8A5A00"
+JAY_BLACK       = "#0D0D0D"
+JAY_CHARCOAL    = "#1A1A1A"
+JAY_CREAM       = "#F5F1E6"
+
+st.markdown(f"""
+<style>
+    .stApp {{
+        background: radial-gradient(circle at 50% -20%, #262019 0%, {JAY_BLACK} 55%);
+    }}
+    .block-container {{
+        max-width: 1100px;
+        padding-top: 1.5rem;
+    }}
+
+    /* ── Brand header banner ─────────────────────────────────────────── */
+    .jay-header {{
+        display: flex;
+        align-items: center;
+        gap: 1.1rem;
+        padding: 1.1rem 1.6rem;
+        border-radius: 16px;
+        margin-bottom: 1.6rem;
+        background: linear-gradient(135deg, {JAY_CHARCOAL} 0%, #14110a 100%);
+        border: 1px solid {JAY_GOLD_DARK};
+        box-shadow: 0 0 24px rgba(242, 185, 12, 0.10);
+    }}
+    .jay-header img {{
+        width: 56px; height: 56px; border-radius: 50%;
+        border: 2px solid {JAY_GOLD};
+    }}
+    .jay-header h1 {{
+        font-size: 1.5rem;
+        margin: 0;
+        background: linear-gradient(90deg, {JAY_GOLD_LIGHT}, {JAY_GOLD} 60%, {JAY_GOLD_DARK});
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 800;
+    }}
+    .jay-header p {{
+        margin: 0.15rem 0 0 0;
+        color: {JAY_CREAM};
+        opacity: 0.75;
+        font-size: 0.92rem;
+    }}
+
+    /* ── Section cards ───────────────────────────────────────────────── */
+    .jay-card {{
+        background: {JAY_CHARCOAL};
+        border: 1px solid #3a2f13;
+        border-radius: 14px;
+        padding: 1.1rem 1.3rem 0.6rem 1.3rem;
+        margin-bottom: 1.1rem;
+    }}
+    .jay-card h3 {{
+        color: {JAY_GOLD};
+        font-size: 1.02rem;
+        margin-top: 0;
+    }}
+
+    /* ── Buttons ──────────────────────────────────────────────────────── */
+    .stButton > button, .stDownloadButton > button {{
+        background: linear-gradient(135deg, {JAY_GOLD_LIGHT}, {JAY_GOLD} 55%, {JAY_GOLD_DARK});
+        color: #1a1200;
+        font-weight: 700;
+        border: none;
+        border-radius: 10px;
+        padding: 0.55rem 1.4rem;
+        box-shadow: 0 2px 10px rgba(242, 185, 12, 0.25);
+        transition: transform 0.05s ease-in-out, box-shadow 0.15s;
+    }}
+    .stButton > button:hover, .stDownloadButton > button:hover {{
+        box-shadow: 0 4px 16px rgba(242, 185, 12, 0.45);
+        transform: translateY(-1px);
+        color: #1a1200;
+    }}
+    .stButton > button:disabled {{
+        background: #3a3222;
+        color: #8a8371;
+        box-shadow: none;
+    }}
+
+    /* ── File uploader ───────────────────────────────────────────────── */
+    [data-testid="stFileUploaderDropzone"] {{
+        background: #14110a;
+        border: 1.5px dashed {JAY_GOLD_DARK};
+        border-radius: 12px;
+    }}
+
+    /* ── Expander (Options) ──────────────────────────────────────────── */
+    [data-testid="stExpander"] {{
+        background: {JAY_CHARCOAL};
+        border: 1px solid #3a2f13;
+        border-radius: 12px;
+    }}
+
+    hr {{ border-color: #3a2f13 !important; }}
+</style>
+""", unsafe_allow_html=True)
+
+# ── UI ─────────────────────────────────────────────────────────────────────────
+_logo_b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode() if LOGO_PATH.exists() else ""
+st.markdown(f"""
+<div class="jay-header">
+    {f'<img src="data:image/jpeg;base64,{_logo_b64}" />' if _logo_b64 else ''}
+    <div>
+        <h1>MC Capacity vs Order — Week-Wise Report</h1>
+        <p>Upload the two source files and click <b>Generate Report</b> to download the updated workbook.</p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 # ── Load reference workbook (bundled with the repo) ────────────────────────────
 REF_PATH = pathlib.Path(__file__).parent / "reference_workbook.xlsx"
@@ -27,32 +148,25 @@ def _load_ref():
 
 ref_bytes = _load_ref()
 
-# ── UI ─────────────────────────────────────────────────────────────────────────
-st.title("📦 MC Capacity vs Order — Week-Wise Report")
-st.markdown(
-    "Upload the two source files and click **Generate Report** "
-    "to download the updated workbook."
-)
-
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("1 · Order Status Report")
+    st.markdown('<div class="jay-card"><h3>1 · Order Status Report</h3>', unsafe_allow_html=True)
     osr_file = st.file_uploader(
         "Upload OrderStatusReport (.xlsx)",
         type=["xlsx"],
         key="osr",
     )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
-    st.subheader("2 · Production Register")
+    st.markdown('<div class="jay-card"><h3>2 · Production Register</h3>', unsafe_allow_html=True)
     pr_file = st.file_uploader(
         "Upload Production Register (.xlsx)",
         type=["xlsx"],
         key="pr",
     )
-
-st.divider()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ── Options ────────────────────────────────────────────────────────────────────
 with st.expander("⚙️ Options", expanded=False):
@@ -137,4 +251,9 @@ st.caption(
     "Reference data (MC MASTER, ITEM MASTER, TBGS PER CTN, routing layout) "
     "is bundled from the last saved workbook. "
     "To update master data, re-deploy with a new `reference_workbook.xlsx`."
+)
+st.markdown(
+    f'<p style="text-align:center; color:{JAY_GOLD_DARK}; '
+    f'font-size:0.78rem; letter-spacing:0.06em;">JAY · MC CAPACITY VS ORDER</p>',
+    unsafe_allow_html=True,
 )
