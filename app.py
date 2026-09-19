@@ -62,31 +62,15 @@ with st.expander("⚙️ Options", expanded=False):
             "As-Of Date (today)",
             value=datetime.date.today(),
         )
-
-    date_range_mode = st.radio(
-        "Date range",
-        ["Rolling window", "All-time (full data range)"],
-        horizontal=True,
-        help=(
-            "Rolling window uses the forward/past week counts below, "
-            "anchored on the As-Of Date. All-time ignores those counts "
-            "and spans every week actually present in the two uploaded "
-            "files — every pending order and the entire production history."
-        ),
-    )
-    all_time = date_range_mode.startswith("All-time")
-
     with c2:
         n_forward = st.number_input(
             "Forward weeks to show",
             min_value=4, max_value=26, value=12, step=1,
-            disabled=all_time,
         )
     with c3:
         n_achieved = st.number_input(
             "Past weeks for Achieved Capacity",
             min_value=2, max_value=8, value=4, step=1,
-            disabled=all_time,
         )
 
 # ── Generate ────────────────────────────────────────────────────────────────────
@@ -106,13 +90,11 @@ if generate_btn and ready:
                 today=today_input,
                 n_weeks_forward=int(n_forward),
                 n_weeks_achieved=int(n_achieved),
-                all_time=all_time,
             )
 
-            suffix = "_AllTime" if all_time else ""
             filename = (
                 f"MC_Capacity_vs_Order_"
-                f"{today_input.strftime('%d-%b-%Y')}{suffix}.xlsx"
+                f"{today_input.strftime('%d-%b-%Y')}.xlsx"
             )
 
             st.success("✅ Report generated successfully!")

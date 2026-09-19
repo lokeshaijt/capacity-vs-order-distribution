@@ -297,6 +297,12 @@ def orders_to_containers(osr_rows, ref, today):
             req_d = reqdate.date()
         elif isinstance(reqdate, datetime.date):
             req_d = reqdate
+        elif isinstance(reqdate, str) and reqdate.strip():
+            # Handle dd-mm-yyyy string format
+            try:
+                req_d = datetime.datetime.strptime(reqdate.strip(), "%d-%m-%Y").date()
+            except ValueError:
+                req_d = None
         else:
             req_d = None
         if req_d:
@@ -617,7 +623,7 @@ def write_lookup_table(ws, routing_map, start_col):
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def generate_report(ref_bytes, osr_bytes, pr_bytes, today=None,
-                    n_weeks_forward=12, n_weeks_achieved=4, all_time=False):
+                    n_weeks_forward=12, n_weeks_achieved=4):
     """
     Parameters
     ----------
@@ -625,12 +631,8 @@ def generate_report(ref_bytes, osr_bytes, pr_bytes, today=None,
     osr_bytes   : bytes — Order Status Report
     pr_bytes    : bytes — Production Register
     today       : datetime.date (defaults to date.today())
-    n_weeks_forward : int — how many forward weeks to show (ignored if all_time)
+    n_weeks_forward : int — how many forward weeks to show
     n_weeks_achieved: int — how many past weeks to show in achieved sheet
-                      (ignored if all_time)
-    all_time    : bool — if True, ignore the rolling-window sizes above and
-                  instead span every week actually present in the uploaded
-                  files (all pending orders + all production history)
 
     Returns
     -------
@@ -654,26 +656,14 @@ def generate_report(ref_bytes, osr_bytes, pr_bytes, today=None,
     today_mon     = today - datetime.timedelta(days=today.weekday())
     current_wn    = weeknum(today_mon)
 
-    order_data    = orders_to_containers(osr_rows, ref, today)
-
-    if all_time:
-        order_wns = {weeknum(rep_mon) for *_, rep_mon in order_data}
-        max_order_wn = max(order_wns) if order_wns else current_wn
-        forward_wns  = list(range(current_wn, max_order_wn + 1))
-
-        prod_wns = {weeknum(d) for d, *_ in prod_rows}
-        if prod_wns:
-            achieved_wns = list(range(min(prod_wns), max(prod_wns) + 1))
-        else:
-            achieved_wns = list(range(current_wn - n_weeks_achieved, current_wn))
-    else:
-        forward_wns  = list(range(current_wn, current_wn + n_weeks_forward))
-        achieved_wns = list(range(current_wn - n_weeks_achieved, current_wn))
-
+    forward_wns   = list(range(current_wn, current_wn + n_weeks_forward))
     forward_mons  = [week_monday(wn) for wn in forward_wns]
     forward_labels= [f"W #{wn}" for wn in forward_wns]
 
+    achieved_wns  = list(range(current_wn - n_weeks_achieved, current_wn))
     achieved_data, skipped = prod_to_containers(prod_rows, ref, set(achieved_wns))
+
+    order_data    = orders_to_containers(osr_rows, ref, today)
 
     # ── Build output workbook from reference (keeps all lookup sheets) ────
     out_wb = openpyxl.load_workbook(io.BytesIO(ref_bytes), data_only=False)
