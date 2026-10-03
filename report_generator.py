@@ -1,804 +1,387 @@
 """
-MC Capacity vs Order — Week-Wise Report Generator
-All logic self-contained; reads reference data from the bundled workbook.
+MC Capacity vs Order — report generator
+========================================
+Order Status Report (OSR)  ->  containers per machine line per week, against capacity.
+
+The report is produced from a *template*: the bundled reference_workbook.xlsx is the finished report
+(layout, colour palette, Excess / Short Order rows, regional sheets, capacity master, lookups).
+Each run only refreshes what changes week to week:
+
+  * the 12 week columns (W # headers and the hidden week-Monday row 500 in ORDER VS WEEK DISTRIBUTION)
+  * the WORKING sheet, rebuilt from the new OSR
+  * MC ROUTING in WORKING, carried forward by PRODUCT NAME (from the previous report you upload, else
+    the routing bundled in the template)
+  * Machines / Shifts, carried forward from the previous report when one is uploaded
+
+Everything else (capacity, Excess / Short rows, AFRICA / AUSTRALIA & EUROPE / USA sheets) is live formulas in the template.
+To change the look, the masters or the capacity basis, replace reference_workbook.xlsx.
 """
 
+import collections
 import datetime
 import io
 import re
-from collections import defaultdict
 
 import openpyxl
-from openpyxl.styles import (
-    Alignment, Border, Color, Font, PatternFill, Side
-)
-from openpyxl.utils import get_column_letter
-from openpyxl.formatting.rule import FormulaRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter as L
 from openpyxl.worksheet.datavalidation import DataValidation
 
-# ── Style constants ────────────────────────────────────────────────────────────
-FONT_NAME = "Trebuchet MS"
+OVW = "ORDER VS WEEK DISTRIBUTION"
+WORKING = "WORKING"
+MC_MASTER = "MC MASTER"
+ITEM_CFC = "ITEM CFC PER CONTAINER"
+OSR_SHEET = "Order Status-By shipment Date"
+FIRST_WEEK_COL = 7                      # G
+HELPER_ROW = 500                        # hidden row with the Monday of each week
+NON_LINE_LABELS = (None, "TOTAL", "Excess Order", "Short Order")
 
-def _font(bold=False, size=11, color="FF000000"):
-    return Font(name=FONT_NAME, bold=bold, size=size, color=color)
+# Spellings that are accepted in MC ROUTING but are not offered in the dropdown
+ROUTE_ALIASES = {"CONSTANTA TAG D", "MD 20 4GM", "PEARL PACK PREMIX"}
 
-def _fill(hex_color):
-    return PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
-
-def _theme_fill(theme, tint):
-    return PatternFill(fgColor=Color(theme=theme, tint=tint), fill_type="solid")
-
-def _border():
-    thin = Side(style="thin", color="FF000000")
-    return Border(left=thin, right=thin, top=thin, bottom=thin)
-
-TITLE_FILL   = _theme_fill(5, 0.4)
-OLIVE_FILL   = _theme_fill(5, -0.5)
-HDR_FILL     = _fill("FFB6C6DE")
-TOTAL_FILL   = TITLE_FILL
-INPUT_FILL   = _fill("FFFFF2CC")
-REGION_FILL  = _fill("FFD9D9D9")
-PLAIN_FILL   = PatternFill()
-
-H_RED        = _font(bold=True, size=12, color="FF9D360E")
-H_WHITE      = _font(bold=True, size=12, color="FFFFFFFF")
-HDR_FONT     = _font(bold=True, size=11)
-NORM         = _font(size=11)
-TOTAL_FONT   = _font(bold=True, size=11)
-RED_FONT     = _font(size=11, color="FFCC0000")
-NUMFMT       = '_ * #,##0.0_ ;_ * \\-#,##0.0_ ;_ * "-"??_ ;_ @_ '
-BORDER       = _border()
+WORKING_HEADERS = [
+    "BUYER NAME", "NAV DOC NO", "Buyer Contact No", "Buyer Requested Shipment Date", "Month-yy",
+    "Plan To Ship", "ITEM ID", "Column1", "PRODUCT NAME", "MC ROUTING", "CONCAT", "BLEND NAME", "SFG NAME",
+    "NO OF CTN PER CFC", "NO OF TBGS PER CTN", "ORDER QTY", "STOCK IN PROCESS", "READY STOCK",
+    "STOCK IN PROCESS + READY STOCK", "PENDING TO PRODUCE IN CASES", "PENDING TO PRODUCE IN TBGS",
+    "WEEK START", "REPORTING WEEK", "CAPACITY GROUP", "PENDING PROD IN CONTAINERS"]
+WORKING_WIDTHS = {1: 24, 2: 16, 3: 22, 4: 13, 5: 9, 6: 13, 7: 9, 8: 22, 9: 42, 10: 22, 11: 22, 12: 24, 13: 30,
+                  14: 10, 15: 10, 16: 10, 17: 10, 18: 10, 19: 12, 20: 12, 21: 13, 22: 12, 23: 13, 24: 16, 25: 14}
 
 
-# ── Reference-data loaders ─────────────────────────────────────────────────────
-
-def load_reference(ref_wb):
-    """Return all lookup tables from the reference workbook."""
-    ref = {}
-
-    # ── TBGS PER CTN  (SFG name → tbgs/ctn) ──────────────────────────────
-    ws = ref_wb["TBGS PER CTN"]
-    ref["tbgs_per_ctn"] = {
-        ws.cell(r, 2).value: ws.cell(r, 3).value
-        for r in range(2, ws.max_row + 1)
-        if ws.cell(r, 2).value and ws.cell(r, 3).value
-    }
-
-    # ── ITEM CFC PER CONTAINER  (product name → cfc/container) ──────────
-    ws = ref_wb["ITEM CFC PER CONTAINER"]
-    ref["item_cfc"] = {
-        ws.cell(r, 1).value: ws.cell(r, 2).value
-        for r in range(2, ws.max_row + 1)
-        if ws.cell(r, 1).value and ws.cell(r, 2).value
-    }
-
-    # ── ITEM MASTER  (prod_id → sfg_name, prod_name → ctn_per_cfc) ───────
-    ws = ref_wb["ITEM MASTER"]
-    prod_id_to_sfg = {}
-    prod_name_to_ctn_cfc = {}
-    sfg_to_tbgspctn = {}          # SFG item-id → tbgs (col G = tbgs)
-    for r in range(2, ws.max_row + 1):
-        pid  = ws.cell(r, 1).value   # FG item id
-        name = ws.cell(r, 2).value   # FG name
-        sid  = ws.cell(r, 4).value   # SFG item id
-        sfg  = ws.cell(r, 5).value   # SFG name
-        ctn  = ws.cell(r, 6).value   # CTN per CFC
-        if pid and sfg:
-            prod_id_to_sfg[pid] = sfg
-        if name and ctn:
-            prod_name_to_ctn_cfc[name] = ctn
-    ref["prod_id_to_sfg"]       = prod_id_to_sfg
-    ref["prod_name_to_ctn_cfc"] = prod_name_to_ctn_cfc
-
-    # ── MC MASTER  (line → factors) ──────────────────────────────────────
-    ws = ref_wb["MC MASTER"]
-    mc_master = {}
-    for r in range(3, ws.max_row + 1):
-        line = ws.cell(r, 1).value
-        if not line:
-            continue
-        mc_master[line] = {
-            "no_machines":    ws.cell(r, 5).value,
-            "no_shifts":      ws.cell(r, 6).value,
-            "tbgs_per_cfc":   ws.cell(r, 14).value,
-            "cfc_per_cntr":   ws.cell(r, 16).value,
-            "weekly_cap_cntr": ws.cell(r, 17).value,
-        }
-    ref["mc_master"] = mc_master
-
-    # ── ORDER VS WEEK DISTRIBUTION layout (region/sub/line table) ─────────
-    ws = ref_wb["ORDER VS WEEK DISTRIBUTION"]
-    layout = []   # list of dicts
-    last_region = last_sub = None
-    for r in range(3, 41):
-        region = ws.cell(r, 1).value
-        sub    = ws.cell(r, 2).value
-        line   = ws.cell(r, 3).value
-        nm     = ws.cell(r, 4).value
-        ns     = ws.cell(r, 5).value
-        if region:
-            last_region = region
-        if sub:
-            last_sub = sub
-        if line == "TOTAL" or line is None:
-            layout.append({"type": "total" if line == "TOTAL" else "blank",
-                            "region": last_region})
-        else:
-            layout.append({"type": "line", "region": last_region,
-                            "sub": last_sub, "line": line,
-                            "no_machines": nm, "no_shifts": ns})
-    ref["layout"] = layout
-
-    # ── Routing table: canonical routing name → capacity-group name ────────
-    # Stored in hidden cols T,U of ORDER VS WEEK DISTRIBUTION
-    ws = ref_wb["ORDER VS WEEK DISTRIBUTION"]
-    routing_map = {}
-    for r in range(2, 50):
-        k = ws.cell(r, 20).value
-        v = ws.cell(r, 21).value
-        if k and v:
-            routing_map[k] = v
-    ref["routing_map"] = routing_map
-
-    # ── WORKING sheet: product→MC ROUTING mapping (last-known) ────────────
-    ws = ref_wb["WORKING"]
-    prod_routing = {}
-    for r in range(2, ws.max_row + 1):
-        pname = ws.cell(r, 9).value
-        route = ws.cell(r, 10).value
-        if pname and route:
-            prod_routing[pname] = route
-    ref["prod_routing"] = prod_routing
-
-    return ref
+# ── Week numbering: continuous from the Monday of the week holding 1 Jan 2026 ─────────────────────────
+_J1 = datetime.date(2026, 1, 1)
+_W1 = _J1 - datetime.timedelta(days=_J1.weekday())
 
 
-# ── OSR extraction ─────────────────────────────────────────────────────────────
+def weeknum(d):
+    mon = d - datetime.timedelta(days=d.weekday())
+    return ((mon - _W1).days // 7) + 1
+
+
+def week_monday(wn):
+    return _W1 + datetime.timedelta(weeks=wn - 1)
+
+
+def monday_of(d):
+    return d - datetime.timedelta(days=d.weekday())
+
+
+def _norm(x):
+    """Product-name key: case, repeated and non-breaking spaces ignored."""
+    return re.sub(r"\s+", " ", str(x).replace("\xa0", " ")).strip().upper()
+
+
+def _to_datetime(v):
+    if isinstance(v, datetime.datetime):
+        return v
+    if isinstance(v, datetime.date):
+        return datetime.datetime.combine(v, datetime.time())
+    try:
+        return datetime.datetime.strptime(str(v).strip(), "%d-%m-%Y")
+    except Exception:
+        return None
+
+
+# ── Order Status Report ───────────────────────────────────────────────────────────────────────────────
 
 def extract_osr(osr_wb):
-    """Return list of order-row tuples from the Order Status Report."""
-    ws = osr_wb["Order Status-By shipment Date"]
-    rows = []
-    last = {"buyer": None, "doc": None, "contact": None, "reqdate": None, "plan": None}
+    """OSR rows: (doc, buyer, contact, req_date, plan_date, prod_id, prod_name, order_qty, in_process, ready, pending)."""
+    if OSR_SHEET not in osr_wb.sheetnames:
+        raise ValueError(f"The Order Status Report needs a sheet named '{OSR_SHEET}' "
+                         f"(found: {', '.join(osr_wb.sheetnames)}).")
+    ws = osr_wb[OSR_SHEET]
+    rows, last = [], {"buyer": None, "doc": None, "contact": None, "reqdate": None, "plan": None}
     for r in range(7, ws.max_row + 1):
-        prod_id = ws.cell(r, 9).value
-        prod_name = ws.cell(r, 10).value
-        for key, col in [("buyer",3),("doc",4),("contact",5),("reqdate",6),("plan",7)]:
+        prod_id, prod_name = ws.cell(r, 9).value, ws.cell(r, 10).value
+        for key, col in (("buyer", 3), ("doc", 4), ("contact", 5), ("reqdate", 6), ("plan", 7)):
             v = ws.cell(r, col).value
             if v not in (None, " ", ""):
                 last[key] = v
         if isinstance(prod_id, (int, float)) and prod_name not in (None, " ", ""):
-            rows.append((
-                last["doc"], last["buyer"], last["contact"],
-                last["reqdate"], last["plan"], prod_id, prod_name,
-                ws.cell(r, 11).value,  # order qty
-                ws.cell(r, 12).value,  # stock wip
-                ws.cell(r, 13).value,  # ready stock
-                ws.cell(r, 15).value,  # pending prod (CFC)
-            ))
+            rows.append((last["doc"], last["buyer"], last["contact"], last["reqdate"], last["plan"],
+                         prod_id, prod_name, ws.cell(r, 11).value, ws.cell(r, 12).value,
+                         ws.cell(r, 13).value, ws.cell(r, 15).value))
+    if not rows:
+        raise ValueError("No product rows were found in the Order Status Report.")
     return rows
 
 
-# ── Production Register extraction ────────────────────────────────────────────
+# ── Reading routing / inputs from a report workbook ───────────────────────────────────────────────────
 
-def extract_prod_register(pr_wb, routing_map):
-    """Return list of (date, group, item_name, qty, uom) for valid packing lines."""
-    ws = pr_wb[pr_wb.sheetnames[0]]
-    rows = []
-    for r in range(8, ws.max_row + 1):
-        pdate = ws.cell(r, 1).value
-        wc    = ws.cell(r, 3).value
-        item_name = ws.cell(r, 6).value
-        qty   = ws.cell(r, 8).value
-        uom   = ws.cell(r, 10).value
-        if not pdate or not wc:
+def read_routes(wb):
+    """{normalised product name: MC ROUTING} from the WORKING sheet of a report (row order is irrelevant)."""
+    if WORKING not in wb.sheetnames:
+        raise ValueError("This workbook has no WORKING sheet, so no routing can be read from it.")
+    ws = wb[WORKING]
+    heads = {str(ws.cell(1, c).value).strip().upper(): c for c in range(1, ws.max_column + 1) if ws.cell(1, c).value}
+    cn, cr = heads.get("PRODUCT NAME", 9), heads.get("MC ROUTING", 10)
+    out = {}
+    for r in range(2, ws.max_row + 1):
+        name, route = ws.cell(r, cn).value, ws.cell(r, cr).value
+        if name in (None, ""):
             continue
-        group = routing_map.get(wc)
+        key = _norm(name)
+        if route not in (None, "", "NOT IN ROUTE MASTER") or key not in out:
+            out[key] = route if route not in ("", "NOT IN ROUTE MASTER") else None
+    return out
+
+
+def read_line_inputs(ov):
+    """{machine line: (machines, shifts)} from the yellow input cells of ORDER VS WEEK DISTRIBUTION."""
+    out = {}
+    for r in range(3, 120):
+        name = ov.cell(r, 3).value
+        if name in NON_LINE_LABELS:
+            continue
+        m, s = ov.cell(r, 4).value, ov.cell(r, 5).value
+        if isinstance(m, (int, float)) and isinstance(s, (int, float)):
+            out[name] = (m, s)
+    return out
+
+
+def routing_table(ov):
+    """{ROUTE UPPER: capacity group} from the hidden lookup in columns T:U of ORDER VS WEEK DISTRIBUTION."""
+    out = {}
+    for r in range(2, 120):
+        k, v = ov.cell(r, 20).value, ov.cell(r, 21).value
+        if k and v:
+            out[str(k)] = v
+    return out
+
+
+# ── WORKING sheet ─────────────────────────────────────────────────────────────────────────────────────
+
+def build_working(wb, osr_rows, routes, table):
+    """Rebuild WORKING from the OSR. Returns (rows written, rows routed)."""
+    idx = wb.sheetnames.index(WORKING)
+    state = wb[WORKING].sheet_state                              # the template keeps WORKING hidden
+    del wb[WORKING]
+    ww = wb.create_sheet(WORKING, idx)
+    ww.sheet_state = state
+
+    candidates = collections.defaultdict(list)                   # capacity group -> routes offered in the dropdown
+    dropdown_group = {}                                          # route (upper) -> group, alias spellings excluded
+    for k, v in table.items():
+        if k.upper() not in ROUTE_ALIASES:
+            candidates[v].append(k)
+            dropdown_group[k.upper()] = v
+
+    FN = "Trebuchet MS"
+    thin = Side(style="thin", color="FFBFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    norm_font = Font(name=FN, size=10)
+    head_font = Font(name=FN, bold=True, color="FFC00000", size=10)
+    head_fill = PatternFill(start_color="FFDCE6F1", end_color="FFDCE6F1", fill_type="solid")
+    drop_fill = PatternFill(start_color="FFD9EAD3", end_color="FFD9EAD3", fill_type="solid")
+    for c, h in enumerate(WORKING_HEADERS, 1):
+        x = ww.cell(1, c, h)
+        x.font, x.fill, x.border = head_font, head_fill, border
+        x.alignment = Alignment(horizontal="center", wrap_text=True)
+
+    wk0 = f"'{OVW}'!$G${HELPER_ROW}"
+    dvs, routed = {}, 0
+    for i, (doc, buyer, contact, reqdate, plandate, pid, pname, oq, sip, rs, pend) in enumerate(osr_rows):
+        r = i + 2
+        rd, pdt = _to_datetime(reqdate), _to_datetime(plandate)
+        ww.cell(r, 1, buyer)
+        ww.cell(r, 2, doc)
+        ww.cell(r, 3, contact)
+        c4 = ww.cell(r, 4, rd if rd else reqdate)
+        if rd:
+            c4.number_format = "dd-mmm-yy"
+        ww.cell(r, 5, f'=IF(ISNUMBER($D{r}),EOMONTH($D{r},-1)+1,"")').number_format = "mmm-yy"
+        c6 = ww.cell(r, 6, pdt if pdt else plandate)
+        if pdt:
+            c6.number_format = "dd-mmm-yy"
+        ww.cell(r, 7, pid)
+        ww.cell(r, 8, f"=B{r}&I{r}")
+        ww.cell(r, 9, pname)
+        route = routes.get(_norm(pname))
+        mc = ww.cell(r, 10)
+        if route:
+            routed += 1
+            cands = candidates.get(dropdown_group.get(str(route).upper()), [])
+            if len(cands) > 1:
+                key = tuple(cands)
+                if key not in dvs:
+                    dvs[key] = DataValidation(type="list", formula1='"' + ",".join(cands) + '"',
+                                              allow_blank=True, showDropDown=False)
+                    ww.add_data_validation(dvs[key])
+                dvs[key].add(mc)
+                mc.fill = drop_fill
+            mc.value = route
+        ww.cell(r, 11, f'=J{r}&"-"&TEXT(W{r},"dd-mmm-yy")')
+        ww.cell(r, 12, f"=IFERROR(VLOOKUP($M{r},'ITEM MASTER'!E:H,4,0),\"\")")
+        ww.cell(r, 13, f"=IFERROR(VLOOKUP($I{r},'ITEM MASTER'!B:E,4,0),\"\")")
+        ww.cell(r, 14, f"=IFERROR(VLOOKUP($I{r},'ITEM MASTER'!B:F,5,0),0)")
+        ww.cell(r, 15, f"=IFERROR(VLOOKUP($M{r},'TBGS PER CTN'!B:C,2,0),0)")
+        ww.cell(r, 16, oq if isinstance(oq, (int, float)) else 0)
+        ww.cell(r, 17, sip if isinstance(sip, (int, float)) else 0)
+        ww.cell(r, 18, rs if isinstance(rs, (int, float)) else 0)
+        ww.cell(r, 19, f"=Q{r}+R{r}")
+        ww.cell(r, 20, pend if isinstance(pend, (int, float)) else 0).number_format = "#,##0"
+        ww.cell(r, 21, f"=N{r}*O{r}*T{r}").number_format = "#,##0"
+        ww.cell(r, 22, f"=IF(ISNUMBER($D{r}),$D{r}-WEEKDAY($D{r},3),{wk0})").number_format = "dd-mmm-yy"
+        ww.cell(r, 23, f"=MAX($V{r},{wk0})").number_format = "dd-mmm-yy"
+        ww.cell(r, 24, f"=IFERROR(VLOOKUP($J{r},'{OVW}'!$T:$U,2,0),\"\")")
+        ic = f"VLOOKUP($I{r},'{ITEM_CFC}'!$A:$B,2,0)"
+        mf = f"VLOOKUP($X{r},'{MC_MASTER}'!$A:$Q,16,0)"
+        ww.cell(r, 25, f'=IFERROR($T{r}/IF(IFERROR({ic},0)>0,{ic},{mf}),"")')
+        for c in range(1, 26):
+            ww.cell(r, c).border = border
+            ww.cell(r, c).font = norm_font
+    for col, w in WORKING_WIDTHS.items():
+        ww.column_dimensions[L(col)].width = w
+    ww.row_dimensions[1].height = 35.05
+    ww.freeze_panes = "A2"
+    ww.auto_filter.ref = f"A1:Y{len(osr_rows) + 1}"             # filter buttons on the header row, as in the template
+    return len(osr_rows), routed
+
+
+# ── Python-side estimate (shown in the app; mirrors the workbook formulas) ───────────────────────────
+
+def estimate_containers(osr_rows, routes, table, item_cfc, line_cfc, cur_mon, n_weeks):
+    """Containers per machine line and week as the workbook will calculate them."""
+    group_of = {k.upper(): v for k, v in table.items()}
+    per_week = collections.defaultdict(float)                    # (group, week index) -> containers
+    after = 0.0
+    for (doc, buyer, contact, reqdate, plandate, pid, pname, oq, sip, rs, pend) in osr_rows:
+        if not isinstance(pend, (int, float)) or pend <= 0:
+            continue
+        route = routes.get(_norm(pname))
+        group = group_of.get(str(route).upper()) if route else None
         if not group:
             continue
-        if uom not in ("CTN", "CFC"):
+        per = item_cfc.get(str(pname).upper()) or line_cfc.get(group)
+        if not per:
             continue
-        d = pdate.date() if isinstance(pdate, datetime.datetime) else pdate
-        rows.append((d, group, item_name, qty, uom))
-    return rows
-
-
-# ── Week helpers ───────────────────────────────────────────────────────────────
-
-_JAN1_2026 = datetime.date(2026, 1, 1)
-_WEEK1_MON = _JAN1_2026 - datetime.timedelta(days=_JAN1_2026.weekday())
-
-
-def weeknum(d):
-    monday = d - datetime.timedelta(days=d.weekday())
-    return ((monday - _WEEK1_MON).days // 7) + 1
-
-
-def week_monday(wn):
-    return _WEEK1_MON + datetime.timedelta(weeks=wn - 1)
-
-
-# ── Container conversion ───────────────────────────────────────────────────────
-
-def prod_to_containers(prod_rows, ref, target_weeks):
-    """Convert production-register rows to container counts per (group, week)."""
-    tbgs_per_ctn = ref["tbgs_per_ctn"]
-    mc_master    = ref["mc_master"]
-    result = defaultdict(float)
-    skipped = []
-
-    for d, group, item_name, qty, uom in prod_rows:
-        wn = weeknum(d)
-        if wn not in target_weeks:
-            continue
-        factors = mc_master.get(group, {})
-        tpc = factors.get("tbgs_per_cfc")
-        cpc = factors.get("cfc_per_cntr")
-        if not tpc or not cpc:
-            skipped.append(("no_factors", group, item_name))
-            continue
-        if uom == "CTN":
-            tbgs_ctn = tbgs_per_ctn.get(item_name)
-            if not tbgs_ctn:
-                # Derive from product name: e.g. "25 DC ENV" → 25
-                m = re.search(r"\b(\d+)\s+DC\b", item_name or "")
-                tbgs_ctn = int(m.group(1)) if m else None
-            if not tbgs_ctn:
-                skipped.append(("no_tbgs", group, item_name))
-                continue
-            cfc = qty * tbgs_ctn / tpc
+        rd = _to_datetime(reqdate)
+        mon = max(monday_of(rd.date()), cur_mon) if rd else cur_mon
+        wi = (mon - cur_mon).days // 7
+        if wi < n_weeks:
+            per_week[(group, wi)] += pend / per
         else:
-            cfc = qty
-        result[(group, wn)] += cfc / cpc
-
-    return dict(result), skipped
+            after += pend / per
+    return per_week, after
 
 
-# ── Order-to-container conversion ─────────────────────────────────────────────
+# ── Main entry ────────────────────────────────────────────────────────────────────────────────────────
 
-def orders_to_containers(osr_rows, ref, today):
+def generate_report(osr_bytes, template_bytes, as_of=None, prev_report_bytes=None):
     """
-    Return list of enriched order rows with week bucketing and container counts.
-    Each row: (prod_name, group, pending_cfc, containers, reporting_week_monday)
-    """
-    tbgs_per_ctn  = ref["tbgs_per_ctn"]
-    item_cfc      = ref["item_cfc"]
-    prod_routing  = ref["prod_routing"]
-    routing_map   = ref["routing_map"]
-    mc_master     = ref["mc_master"]
-    today_mon     = today - datetime.timedelta(days=today.weekday())
+    osr_bytes         Order Status Report (.xlsx)
+    template_bytes    reference_workbook.xlsx (the finished report used as the template)
+    as_of             date of the OSR; the first week column is the week holding this date
+    prev_report_bytes optional: last week's report (its MC ROUTING and Machines/Shifts are carried forward)
 
-    result = []
-    for row in osr_rows:
-        (doc, buyer, contact, reqdate, plandate, prod_id, prod_name,
-         order_qty, stock_wip, ready_stock, pending_cfc) = row
-        if not isinstance(pending_cfc, (int, float)) or pending_cfc <= 0:
+    Returns (xlsx bytes, info dict)
+    """
+    as_of = as_of or datetime.date.today()
+    cur_mon = monday_of(as_of)
+
+    wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
+    for need in (OVW, WORKING, MC_MASTER, ITEM_CFC):
+        if need not in wb.sheetnames:
+            raise ValueError(f"The template workbook has no sheet '{need}'.")
+    ov = wb[OVW]
+    table = routing_table(ov)
+
+    # --- routing and inputs: template first, then the previous report on top
+    bundled_all = read_routes(wb)                         # every product the template knows (routed or not)
+    routes = {k: v for k, v in bundled_all.items() if v}
+    known = set(bundled_all)
+    source = "bundled with the app"
+    inputs_changed = []
+    if prev_report_bytes:
+        pw = openpyxl.load_workbook(io.BytesIO(prev_report_bytes))
+        prev_all = read_routes(pw)
+        for k, v in prev_all.items():
+            if v:
+                routes[k] = v
+        known |= set(prev_all)
+        source = "previous report"
+        if OVW in pw.sheetnames:
+            prev_inputs = read_line_inputs(pw[OVW])
+            mm = wb[MC_MASTER]
+            for r in range(3, 120):
+                name = ov.cell(r, 3).value
+                if name in NON_LINE_LABELS or name not in prev_inputs:
+                    continue
+                old = (ov.cell(r, 4).value, ov.cell(r, 5).value)
+                new = prev_inputs[name]
+                if old != new:
+                    inputs_changed.append((name, old, new))
+                    ov.cell(r, 4).value, ov.cell(r, 5).value = new
+                    for rr in range(3, mm.max_row + 1):
+                        if mm.cell(rr, 1).value == name:
+                            mm.cell(rr, 5).value, mm.cell(rr, 6).value = new
+                            break
+
+    # --- weeks
+    n_weeks = 0
+    while str(ov.cell(2, FIRST_WEEK_COL + n_weeks).value or "").startswith("W #"):
+        n_weeks += 1
+    if n_weeks == 0:
+        raise ValueError("Could not find the week columns (W #…) in the template.")
+    first_wn = weeknum(cur_mon)
+    for i in range(n_weeks):
+        ov.cell(2, FIRST_WEEK_COL + i).value = f"W #{first_wn + i}"
+        c = ov.cell(HELPER_ROW, FIRST_WEEK_COL + i)
+        c.value = (f"=DATE({cur_mon.year},{cur_mon.month},{cur_mon.day})" if i == 0
+                   else f"={L(FIRST_WEEK_COL + i - 1)}{HELPER_ROW}+7")
+    ov.row_dimensions[HELPER_ROW].hidden = True
+
+    # --- WORKING from the new OSR
+    osr_rows = extract_osr(openpyxl.load_workbook(io.BytesIO(osr_bytes), data_only=True))
+    n_rows, n_routed = build_working(wb, osr_rows, routes, table)
+
+    # --- estimate for the app (same arithmetic as the formulas)
+    wv = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=True)
+    item_cfc = {}
+    icc = wv[ITEM_CFC]
+    for r in range(2, icc.max_row + 1):
+        k, v = icc.cell(r, 1).value, icc.cell(r, 2).value
+        if k and isinstance(v, (int, float)) and str(k).upper() not in item_cfc:
+            item_cfc[str(k).upper()] = v                          # first match wins, like VLOOKUP
+    mcv = wv[MC_MASTER]
+    line_cfc = {mcv.cell(r, 1).value: mcv.cell(r, 16).value for r in range(3, mcv.max_row + 1)
+                if mcv.cell(r, 1).value and isinstance(mcv.cell(r, 16).value, (int, float))}
+    per_week, after = estimate_containers(osr_rows, routes, table, item_cfc, line_cfc, cur_mon, n_weeks)
+
+    group_of = {k.upper(): v for k, v in table.items()}
+    unrouted, unknown_route, new_products = collections.defaultdict(float), collections.defaultdict(float), set()
+    for (doc, buyer, contact, reqdate, plandate, pid, pname, oq, sip, rs, pend) in osr_rows:
+        if not isinstance(pend, (int, float)) or pend <= 0:
             continue
-
-        # Routing → capacity group
-        route = prod_routing.get(prod_name)
+        key = _norm(pname)
+        route = routes.get(key)
         if not route:
-            continue
-        group = routing_map.get(route)
-        if not group:
-            continue
+            unrouted[str(pname).strip()] += pend
+            if key not in known:
+                new_products.add(str(pname).strip())
+        elif str(route).upper() not in group_of:
+            unknown_route[str(route)] += pend
+
+    # --- only the report tab is selected (otherwise Excel opens with grouped sheets)
+    for ws in wb.worksheets:
+        ws.sheet_view.tabSelected = (ws.title == OVW)
+    wb.active = wb.sheetnames.index(OVW)
 
-        # CFC → containers
-        cfc_per_cntr = item_cfc.get(prod_name)
-        if not cfc_per_cntr:
-            factors = mc_master.get(group, {})
-            cfc_per_cntr = factors.get("cfc_per_cntr")
-        if not cfc_per_cntr:
-            continue
-        containers = pending_cfc / cfc_per_cntr
-
-        # Week bucketing
-        if isinstance(reqdate, datetime.datetime):
-            req_d = reqdate.date()
-        elif isinstance(reqdate, datetime.date):
-            req_d = reqdate
-        elif isinstance(reqdate, str) and reqdate.strip():
-            # Handle dd-mm-yyyy string format
-            try:
-                req_d = datetime.datetime.strptime(reqdate.strip(), "%d-%m-%Y").date()
-            except ValueError:
-                req_d = None
-        else:
-            req_d = None
-        if req_d:
-            req_mon = req_d - datetime.timedelta(days=req_d.weekday())
-            rep_mon = max(req_mon, today_mon)
-        else:
-            rep_mon = today_mon
-
-        result.append((prod_name, group, pending_cfc, containers, rep_mon))
-    return result
-
-
-# ── Sheet builders ─────────────────────────────────────────────────────────────
-
-def _write_header_rows(ws, title_left, title_right, week_labels, n_fixed_cols=6):
-    """Write the two title/header rows common to all distribution sheets."""
-    ws.merge_cells(f"A1:{get_column_letter(n_fixed_cols)}1")
-    ws["A1"] = title_left
-    ws["A1"].font = H_RED; ws["A1"].fill = TITLE_FILL
-    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
-
-    n_weeks = len(week_labels)
-    wfc = n_fixed_cols + 1
-    ws.merge_cells(start_row=1, start_column=wfc, end_row=1,
-                   end_column=wfc + n_weeks - 1)
-    ws.cell(1, wfc, title_right)
-    ws.cell(1, wfc).font = H_WHITE; ws.cell(1, wfc).fill = OLIVE_FILL
-    ws.cell(1, wfc).alignment = Alignment(horizontal="center", vertical="center")
-
-    hdr_labels = ["Region", None, "Machine Line",
-                  "No. of Machines", "No. of Shifts", "Capacity(In containers)"]
-    for c, h in enumerate(hdr_labels, 1):
-        cell = ws.cell(2, c, h)
-        cell.font = HDR_FONT; cell.fill = HDR_FILL; cell.border = BORDER
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for i, lbl in enumerate(week_labels):
-        cell = ws.cell(2, wfc + i, lbl)
-        cell.font = HDR_FONT; cell.fill = HDR_FILL; cell.border = BORDER
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        ws.column_dimensions[get_column_letter(wfc + i)].width = 7
-
-    ws.column_dimensions["A"].width = 12
-    ws.column_dimensions["B"].width = 13
-    ws.column_dimensions["C"].width = 22
-    ws.column_dimensions["D"].width = 12
-    ws.column_dimensions["E"].width = 10
-    ws.column_dimensions["F"].width = 14
-
-
-def _apply_merges_and_cf(ws, pending_merges, n_weeks, wfc, first_data_row, last_row):
-    for col_letter, ds, de in pending_merges:
-        if de > ds:
-            ws.merge_cells(f"{col_letter}{ds}:{col_letter}{de}")
-        ws[f"{col_letter}{ds}"].alignment = Alignment(
-            horizontal="center", vertical="center")
-
-    for i in range(n_weeks):
-        col = get_column_letter(wfc + i)
-        rng = f"{col}{first_data_row}:{col}{last_row}"
-        ws.conditional_formatting.add(rng, FormulaRule(
-            formula=[f'AND(${col}{first_data_row}<>"",'
-                     f'$F{first_data_row}<>"",$F{first_data_row}>0,'
-                     f'{col}{first_data_row}>$F{first_data_row})'],
-            font=RED_FONT))
-
-    ws.freeze_panes = f"{get_column_letter(wfc)}{first_data_row}"
-    ws.sheet_view.showGridLines = False
-
-
-def build_order_sheet(ws, layout, ref, week_labels, week_mondays, order_data,
-                      title_right="WEEK WISE ANALYSIS"):
-    """Build ORDER VS WEEK DISTRIBUTION or a regional mirror."""
-    wfc = 7
-    n_weeks = len(week_labels)
-    _write_header_rows(ws, "Order Vs Week Distribution", title_right,
-                       week_labels)
-
-    # Aggregate orders: (group, week_monday) → total containers
-    orders_by_gw = defaultdict(float)
-    for prod_name, group, pending_cfc, containers, rep_mon in order_data:
-        orders_by_gw[(group, rep_mon)] += containers
-
-    cap_tmpl = (
-        "=IFERROR(ROUNDUP((VLOOKUP($C{r},'MC MASTER'!$A:$Q,7,0)"
-        "*VLOOKUP($C{r},'MC MASTER'!$A:$Q,10,0)*$D{r}*$E{r}*6)"
-        "*(VLOOKUP($C{r},'MC MASTER'!$A:$Q,13,0)"
-        "/VLOOKUP($C{r},'MC MASTER'!$A:$Q,12,0))"
-        "/VLOOKUP($C{r},'MC MASTER'!$A:$Q,14,0),0)"
-        "/VLOOKUP($C{r},'MC MASTER'!$A:$Q,16,0),\"\")"
-    )
-
-    FIRST_DATA_ROW = 3
-    r = FIRST_DATA_ROW
-    pending_merges = []
-    cur_a_start = cur_b_start = None
-    pending_total_start = r
-    cur_sub = None
-    _cur_region = None
-
-    mc_master = ref["mc_master"]
-
-    for item in layout:
-        if item["type"] == "blank":
-            r += 1
-            pending_total_start = r
-            cur_sub = None
-            continue
-
-        if item["type"] == "total":
-            if cur_sub is not None:
-                merge_end = r - 1
-                if cur_b_start is not None and merge_end >= cur_b_start:
-                    pending_merges.append(("B", cur_b_start, merge_end))
-                cur_b_start = None
-                cur_sub = None
-
-            start_r, end_r = pending_total_start, r - 1
-
-            # Close region merge when TOTAL follows REGION lines
-            # (region boundary detected: next item has a different region)
-            ws.cell(r, 3, "TOTAL")
-            ws.cell(r, 6, f"=SUM(F{start_r}:F{end_r})")
-            for i, mon in enumerate(week_mondays):
-                col = get_column_letter(wfc + i)
-                ws[f"{col}{r}"] = f"=SUM({col}{start_r}:{col}{end_r})"
-            for c in range(1, 7):
-                ws.cell(r, c).font = TOTAL_FONT
-                ws.cell(r, c).fill = TOTAL_FILL
-                ws.cell(r, c).border = BORDER
-            for i in range(n_weeks):
-                col = get_column_letter(wfc + i)
-                ws[f"{col}{r}"].font = TOTAL_FONT
-                ws[f"{col}{r}"].fill = TOTAL_FILL
-                ws[f"{col}{r}"].border = BORDER
-                ws[f"{col}{r}"].number_format = NUMFMT
-            ws.cell(r, 6).number_format = NUMFMT
-            r += 1
-            pending_total_start = r
-            continue
-
-        # data line
-        region = item["region"]
-        sub    = item.get("sub")
-        line   = item["line"]
-        nm     = item.get("no_machines") or (mc_master.get(line, {}).get("no_machines") or "")
-        ns     = item.get("no_shifts")   or (mc_master.get(line, {}).get("no_shifts")   or "")
-
-        # Detect region change
-        if cur_a_start is not None and region != _cur_region:
-            pending_merges.append(("A", cur_a_start, r - 1))
-            cur_a_start = None
-
-        _cur_region = region
-
-        # Track region block start — write label at the very first row of the region
-        if cur_a_start is None:
-            cur_a_start = r
-            # write region label now; merge applied later
-            ws.cell(r, 1, region)
-            ws.cell(r, 1).font = Font(name=FONT_NAME, bold=True, size=11)
-            ws.cell(r, 1).fill = REGION_FILL
-        if sub and sub != cur_sub:
-            if cur_sub is not None and cur_b_start is not None:
-                pending_merges.append(("B", cur_b_start, r - 1))
-            cur_sub = sub
-            cur_b_start = r
-            ws.cell(r, 2, sub).font = NORM
-
-        ws.cell(r, 3, line).font = NORM
-        ws.cell(r, 4, nm); ws.cell(r, 4).fill = INPUT_FILL; ws.cell(r, 4).font = NORM
-        ws.cell(r, 5, ns); ws.cell(r, 5).fill = INPUT_FILL; ws.cell(r, 5).font = NORM
-        ws.cell(r, 6, cap_tmpl.format(r=r)).font = NORM
-        ws.cell(r, 6).number_format = NUMFMT
-
-        for i, mon in enumerate(week_mondays):
-            val = orders_by_gw.get((line, mon), 0)
-            ws.cell(r, wfc + i, val if val else 0)
-            ws.cell(r, wfc + i).font = NORM
-            ws.cell(r, wfc + i).number_format = NUMFMT
-            ws.cell(r, wfc + i).border = BORDER
-
-        for c in (3, 4, 5, 6):
-            ws.cell(r, c).border = BORDER
-
-        r += 1
-
-    LAST_ROW = r - 1
-
-    # close region merge
-    if cur_a_start is not None:
-        pending_merges.append(("A", cur_a_start, LAST_ROW))
-    if cur_b_start is not None:
-        pending_merges.append(("B", cur_b_start, LAST_ROW))
-
-    for col_letter, ds, de in pending_merges:
-        if de > ds:
-            ws.merge_cells(f"{col_letter}{ds}:{col_letter}{de}")
-        ws[f"{col_letter}{ds}"].alignment = Alignment(
-            horizontal="center", vertical="center")
-        if col_letter == "A":
-            ws[f"A{ds}"].font = Font(name=FONT_NAME, bold=True, size=11)
-            ws[f"A{ds}"].fill = REGION_FILL
-
-    _apply_merges_and_cf(ws, [], n_weeks, wfc, FIRST_DATA_ROW, LAST_ROW)
-    return LAST_ROW
-
-
-def build_achieved_sheet(ws, layout, ref, target_weeks, achieved):
-    """Build the Week-Wise Achieved Capacity sheet."""
-    week_labels  = [f"W #{wn}" for wn in target_weeks]
-    week_mondays = [week_monday(wn) for wn in target_weeks]
-    wfc = 7
-    n_weeks = len(target_weeks)
-    _write_header_rows(ws, "Order Vs Week Distribution",
-                       "Week-Wise Achieved Capacity", week_labels)
-
-    FIRST_DATA_ROW = 3
-    r = FIRST_DATA_ROW
-    pending_merges = []
-    cur_a_start = cur_b_start = None
-    pending_total_start = r
-    cur_sub = None
-    _cur_region_a = None
-
-    for item in layout:
-        if item["type"] == "blank":
-            r += 1; pending_total_start = r; cur_sub = None; continue
-
-        if item["type"] == "total":
-            if cur_b_start is not None:
-                pending_merges.append(("B", cur_b_start, r - 1))
-                cur_b_start = None; cur_sub = None
-            start_r, end_r = pending_total_start, r - 1
-            ws.cell(r, 3, "TOTAL")
-            ws.cell(r, 6, f"=SUM(F{start_r}:F{end_r})")
-            for i in range(n_weeks):
-                col = get_column_letter(wfc + i)
-                ws[f"{col}{r}"] = f"=SUM({col}{start_r}:{col}{end_r})"
-            for c in range(1, 7):
-                ws.cell(r, c).font = TOTAL_FONT; ws.cell(r, c).fill = TOTAL_FILL
-                ws.cell(r, c).border = BORDER
-            for i in range(n_weeks):
-                col = get_column_letter(wfc + i)
-                ws[f"{col}{r}"].font = TOTAL_FONT; ws[f"{col}{r}"].fill = TOTAL_FILL
-                ws[f"{col}{r}"].border = BORDER; ws[f"{col}{r}"].number_format = NUMFMT
-            ws.cell(r, 6).number_format = NUMFMT
-            r += 1; pending_total_start = r; continue
-
-        region = item["region"]; sub = item.get("sub"); line = item["line"]
-        nm = item.get("no_machines", ""); ns = item.get("no_shifts", "")
-
-        if cur_a_start is not None and region != _cur_region_a:
-            pending_merges.append(("A", cur_a_start, r - 1))
-            cur_a_start = None
-        _cur_region_a = region
-
-        if cur_a_start is None:
-            cur_a_start = r
-            ws.cell(r, 1, region)
-            ws.cell(r, 1).font = Font(name=FONT_NAME, bold=True, size=11)
-            ws.cell(r, 1).fill = REGION_FILL
-        if sub and sub != cur_sub:
-            if cur_sub is not None and cur_b_start is not None:
-                pending_merges.append(("B", cur_b_start, r - 1))
-            cur_sub = sub; cur_b_start = r
-            ws.cell(r, 2, sub).font = NORM
-
-        ws.cell(r, 3, line).font = NORM
-        ws.cell(r, 4, nm).font = NORM; ws.cell(r, 4).border = BORDER
-        ws.cell(r, 5, ns).font = NORM; ws.cell(r, 5).border = BORDER
-        ws.cell(r, 6, f"=IF('ORDER VS WEEK DISTRIBUTION'!F{r}=\"\",\"\",'ORDER VS WEEK DISTRIBUTION'!F{r})")
-        ws.cell(r, 6).font = NORM; ws.cell(r, 6).number_format = NUMFMT
-        ws.cell(r, 3).border = BORDER
-
-        for i, wn in enumerate(target_weeks):
-            val = achieved.get((line, wn), 0)
-            ws.cell(r, wfc + i, val if val else 0)
-            ws.cell(r, wfc + i).font = NORM
-            ws.cell(r, wfc + i).number_format = NUMFMT
-            ws.cell(r, wfc + i).border = BORDER
-
-        r += 1
-
-    LAST_ROW = r - 1
-
-    if cur_a_start is not None:
-        pending_merges.append(("A", cur_a_start, LAST_ROW))
-    if cur_b_start is not None:
-        pending_merges.append(("B", cur_b_start, LAST_ROW))
-
-    for col_letter, ds, de in pending_merges:
-        if de > ds:
-            ws.merge_cells(f"{col_letter}{ds}:{col_letter}{de}")
-        ws[f"{col_letter}{ds}"].alignment = Alignment(
-            horizontal="center", vertical="center")
-        if col_letter == "A":
-            ws[f"A{ds}"].font = Font(name=FONT_NAME, bold=True, size=11)
-            ws[f"A{ds}"].fill = REGION_FILL
-
-    _apply_merges_and_cf(ws, [], n_weeks, wfc, FIRST_DATA_ROW, LAST_ROW)
-    return LAST_ROW
-
-
-# ── Hidden lookup table writer ─────────────────────────────────────────────────
-
-def write_lookup_table(ws, routing_map, start_col):
-    hf = Font(name=FONT_NAME, size=9, color="FFAAAAAA")
-    lc1 = get_column_letter(start_col); lc2 = get_column_letter(start_col + 1)
-    ws[f"{lc1}1"] = "Routing Line"; ws[f"{lc1}1"].font = hf
-    ws[f"{lc2}1"] = "Capacity Group"; ws[f"{lc2}1"].font = hf
-    for i, (k, v) in enumerate(routing_map.items()):
-        ws.cell(i + 2, start_col, k).font = hf
-        ws.cell(i + 2, start_col + 1, v).font = hf
-    ws.column_dimensions[lc1].hidden = True
-    ws.column_dimensions[lc2].hidden = True
-
-
-# ── Main entry point ───────────────────────────────────────────────────────────
-
-def generate_report(ref_bytes, osr_bytes, pr_bytes, today=None,
-                    n_weeks_forward=12, n_weeks_achieved=4):
-    """
-    Parameters
-    ----------
-    ref_bytes   : bytes — reference workbook
-    osr_bytes   : bytes — Order Status Report
-    pr_bytes    : bytes — Production Register
-    today       : datetime.date (defaults to date.today())
-    n_weeks_forward : int — how many forward weeks to show
-    n_weeks_achieved: int — how many past weeks to show in achieved sheet
-
-    Returns
-    -------
-    bytes — the generated .xlsx workbook
-    """
-    if today is None:
-        today = datetime.date.today()
-
-    # ── Load workbooks ────────────────────────────────────────────────────
-    ref_wb = openpyxl.load_workbook(io.BytesIO(ref_bytes), data_only=True)
-    osr_wb = openpyxl.load_workbook(io.BytesIO(osr_bytes), data_only=True)
-    pr_wb  = openpyxl.load_workbook(io.BytesIO(pr_bytes),  data_only=True)
-
-    ref = load_reference(ref_wb)
-
-    # ── Extract data ─────────────────────────────────────────────────────
-    osr_rows  = extract_osr(osr_wb)
-    prod_rows = extract_prod_register(pr_wb, ref["routing_map"])
-
-    # ── Week ranges ───────────────────────────────────────────────────────
-    today_mon     = today - datetime.timedelta(days=today.weekday())
-    current_wn    = weeknum(today_mon)
-
-    forward_wns   = list(range(current_wn, current_wn + n_weeks_forward))
-    forward_mons  = [week_monday(wn) for wn in forward_wns]
-    forward_labels= [f"W #{wn}" for wn in forward_wns]
-
-    achieved_wns  = list(range(current_wn - n_weeks_achieved, current_wn))
-    achieved_data, skipped = prod_to_containers(prod_rows, ref, set(achieved_wns))
-
-    order_data    = orders_to_containers(osr_rows, ref, today)
-
-    # ── Build output workbook from reference (keeps all lookup sheets) ────
-    out_wb = openpyxl.load_workbook(io.BytesIO(ref_bytes), data_only=False)
-
-    # Remove sheets we will regenerate
-    for sn in ["ORDER VS WEEK DISTRIBUTION", "AFRICA", "EUROPE", "USA",
-               "Week-Wise Achieved Capacity", "WORKING"]:
-        if sn in out_wb.sheetnames:
-            del out_wb[sn]
-
-    layout = ref["layout"]
-
-    # ── ORDER VS WEEK DISTRIBUTION ────────────────────────────────────────
-    ws_main = out_wb.create_sheet("ORDER VS WEEK DISTRIBUTION")
-    write_lookup_table(ws_main, ref["routing_map"], 20)
-    main_last_row = build_order_sheet(
-        ws_main, layout, ref, forward_labels, forward_mons, order_data)
-
-    # ── Regional sheets ───────────────────────────────────────────────────
-    region_row_ranges = {
-        "AFRICA":  [],
-        "EUROPE":  [],
-        "USA":     [],
-    }
-    r = 3
-    for item in layout:
-        region = item.get("region", "")
-        if region == "AFRICA":
-            region_row_ranges["AFRICA"].append(r)
-        elif region in ("EUROPE", "RUSSIA"):
-            region_row_ranges["EUROPE"].append(r)
-        elif region in ("USA", "AUSTRALIA"):
-            region_row_ranges["USA"].append(r)
-        r += 1 if item["type"] != "blank" else 1
-
-    for sheet_name in ["AFRICA", "EUROPE", "USA"]:
-        ws_reg = out_wb.create_sheet(sheet_name)
-        _build_regional_mirror(ws_reg, ws_main, region_row_ranges[sheet_name],
-                               len(forward_wns), 7)
-
-    # ── Week-Wise Achieved Capacity ───────────────────────────────────────
-    ws_ach = out_wb.create_sheet("Week-Wise Achieved Capacity")
-    build_achieved_sheet(ws_ach, layout, ref, achieved_wns, achieved_data)
-
-    # ── Update As-Of date in MC SUMMARY - WEEK WISE ───────────────────────
-    if "MC SUMMARY - WEEK WISE" in out_wb.sheetnames:
-        out_wb["MC SUMMARY - WEEK WISE"]["J1"] = datetime.datetime.combine(
-            today, datetime.time())
-
-    # ── Return as bytes ───────────────────────────────────────────────────
     buf = io.BytesIO()
-    out_wb.save(buf)
-    buf.seek(0)
-    return buf.getvalue(), skipped
-
-
-def _build_regional_mirror(ws, ws_main, source_rows, n_weeks, wfc):
-    """Build a regional sheet as a live formula mirror of ORDER VS WEEK DISTRIBUTION."""
-    FONT_NAME_L = FONT_NAME
-
-    # title + header rows (row 1 & 2)
-    ws.merge_cells(f"A1:F1")
-    ws["A1"] = "Order Vs Week Distribution"
-    ws["A1"].font = H_RED; ws["A1"].fill = TITLE_FILL
-    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
-    ws.merge_cells(start_row=1, start_column=wfc, end_row=1,
-                   end_column=wfc + n_weeks - 1)
-    ws.cell(1, wfc, "WEEK WISE ANALYSIS")
-    ws.cell(1, wfc).font = H_WHITE; ws.cell(1, wfc).fill = OLIVE_FILL
-    ws.cell(1, wfc).alignment = Alignment(horizontal="center", vertical="center")
-
-    for c in range(1, wfc + n_weeks):
-        cell = ws.cell(2, c,
-            f"='ORDER VS WEEK DISTRIBUTION'!{get_column_letter(c)}2")
-        cell.font = HDR_FONT; cell.fill = HDR_FILL; cell.border = BORDER
-        cell.alignment = Alignment(horizontal="center", vertical="center",
-                                   wrap_text=True)
-        if c >= wfc:
-            ws.column_dimensions[get_column_letter(c)].width = 7
-    ws.column_dimensions["A"].width = 12; ws.column_dimensions["B"].width = 13
-    ws.column_dimensions["C"].width = 22; ws.column_dimensions["D"].width = 12
-    ws.column_dimensions["E"].width = 10; ws.column_dimensions["F"].width = 14
-
-    # data rows
-    dest_row = 3
-    pending_merges = []
-    cur_a_start = cur_b_start = None
-
-    for src_row in source_rows:
-        a_val = ws_main.cell(src_row, 1).value
-        b_val = ws_main.cell(src_row, 2).value
-        if a_val not in (None, ""):
-            if cur_a_start is not None:
-                pending_merges.append(("A", cur_a_start, dest_row - 1))
-            cur_a_start = dest_row
-        if b_val not in (None, ""):
-            if cur_b_start is not None:
-                pending_merges.append(("B", cur_b_start, dest_row - 1))
-            cur_b_start = dest_row
-
-        is_total = ws_main.cell(src_row, 3).value == "TOTAL"
-        for c in range(1, wfc + n_weeks):
-            col = get_column_letter(c)
-            ref_val = f"'ORDER VS WEEK DISTRIBUTION'!{col}{src_row}"
-            cell = ws.cell(dest_row, c, f'=IF({ref_val}="","",{ref_val})')
-            cell.font = TOTAL_FONT if is_total else NORM
-            cell.fill = TOTAL_FILL if is_total else PatternFill()
-            cell.border = BORDER
-            if c >= 4:
-                cell.number_format = NUMFMT
-
-        if a_val:
-            ws.cell(dest_row, 1).fill = REGION_FILL
-            ws.cell(dest_row, 1).font = Font(name=FONT_NAME_L, bold=True, size=11)
-
-        dest_row += 1
-
-    LAST_ROW = dest_row - 1
-    if cur_a_start is not None:
-        pending_merges.append(("A", cur_a_start, LAST_ROW))
-    if cur_b_start is not None:
-        pending_merges.append(("B", cur_b_start, LAST_ROW))
-
-    for col_letter, ds, de in pending_merges:
-        if de > ds:
-            ws.merge_cells(f"{col_letter}{ds}:{col_letter}{de}")
-        ws[f"{col_letter}{ds}"].alignment = Alignment(
-            horizontal="center", vertical="center")
-
-    for i in range(n_weeks):
-        col = get_column_letter(wfc + i)
-        rng = f"{col}3:{col}{LAST_ROW}"
-        ws.conditional_formatting.add(rng, FormulaRule(
-            formula=[f'AND(${col}3<>"",$F3<>"",$F3>0,{col}3>$F3)'],
-            font=RED_FONT))
-
-    ws.freeze_panes = f"{get_column_letter(wfc)}3"
-    ws.sheet_view.showGridLines = False
+    wb.save(buf)
+    info = {
+        "as_of": as_of,
+        "first_week": first_wn,
+        "last_week": first_wn + n_weeks - 1,
+        "osr_rows": n_rows,
+        "routed_rows": n_routed,
+        "routing_source": source,
+        "containers_in_report": round(sum(per_week.values()), 2),
+        "containers_after_last_week": round(after, 2),
+        "unrouted": sorted(unrouted.items(), key=lambda kv: -kv[1]),
+        "unknown_routes": sorted(unknown_route.items(), key=lambda kv: -kv[1]),
+        "new_products": sorted(new_products),
+        "inputs_changed": inputs_changed,
+    }
+    return buf.getvalue(), info

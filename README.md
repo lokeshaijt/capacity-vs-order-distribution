@@ -1,62 +1,71 @@
-# MC Capacity vs Order — Week-Wise Report Generator
+# Capacity vs Order Distribution — Report Generator
 
-Streamlit app that takes two weekly uploads and produces the full
-MC Capacity vs Order workbook automatically.
+Streamlit app: upload the **Order Status Report (OSR)** → download the **Capacity vs Order Distribution** workbook
+(New capacity — Arul Sir).
 
-## What it generates
+## What it produces
 
-| Sheet | Description |
+The finalized report, with these sheets:
+
+| Sheet | Visible |
 |---|---|
-| `ORDER VS WEEK DISTRIBUTION` | 12-week forward order vs capacity by region/machine line |
-| `AFRICA` / `EUROPE` / `USA` | Regional mirrors (live formulas) |
-| `Week-Wise Achieved Capacity` | Last 4 weeks actual production vs achievable capacity |
+| `ORDER VS WEEK DISTRIBUTION` | yes — the main report |
+| `AFRICA` | yes |
+| `AUSTRALIA & EUROPE` | yes — Australia, then Europe |
+| `USA` | yes |
+| `ITEM MASTER` · `TBGS PER CTN` · `MC CAPACITY MASTER` · `MC MASTER` · `ITEM CFC PER CONTAINER` · `WORKING` · `MACHINE CAPACITY MASTER` | hidden (right-click a tab → Unhide) |
 
-## Files in this repo
+- 12 week columns from the OSR week; pending orders in containers per machine line.
+- **Excess Order** / **Short Order** rows under every TOTAL (all four visible sheets).
+- Capacity is live (unit capacity × Machines × Shifts); change the yellow cells and everything recalculates.
+- Over-capacity weeks are red.
+- RUSSIA appears on `ORDER VS WEEK DISTRIBUTION` only.
+- Fonts, colours, column widths, hidden sheets and sheet names are exactly those of the template.
+
+## How it works
+
+`reference_workbook.xlsx` is the finished report and is used as the **template**: layout, fonts, colour palette,
+regional sheets, hidden sheets, capacity master, lookups. Each run refreshes only what changes weekly:
+
+| Refreshed | From |
+|---|---|
+| Week headers (`W #…`) and the hidden week-Monday row 500 | the OSR date you pick |
+| `WORKING` sheet | the new OSR |
+| `MC ROUTING` (column J of `WORKING`) | **by product name** — from last week's report if you upload it, else the routing bundled in the template |
+| Machines / Shifts | last week's report if uploaded, else the template |
+
+Because routing is matched by product name, it does not matter how `WORKING` is sorted in the report you upload.
+(Sort the *whole* table, though — if only some columns are sorted, names detach from quantities in that file.)
+
+## After generating
+
+- **New products** with pending orders and no route are listed. Unhide `WORKING`, type a route in column J; they flow
+  into the report. Upload that report next week to keep the routing.
+- **Routes not in the routing table** (e.g. a product routed to PAKONA, which has no line in the report) are listed
+  and not counted. Accepted alias spellings: `CONSTANTA TAG D`, `MD 20 4GM`, `Pearl Pack Premix`.
+- Products with no route at all (e.g. bulk lines) are not counted.
+- Orders due before the OSR week are counted in the first week; orders beyond the 12th week are not shown
+  (the app tells you how many containers that is).
+
+## Updating the masters, look, or capacity
+
+Replace `reference_workbook.xlsx` with an updated finished report (keep the sheet names `ORDER VS WEEK DISTRIBUTION`,
+`WORKING`, `MC MASTER`, `ITEM CFC PER CONTAINER`). That is how to change the fonts, the colour palette, sheet names,
+which sheets are hidden, the capacity basis (`MC MASTER` column R = unit capacity per machine per shift), the layout,
+`ITEM CFC PER CONTAINER` or the routing lookup.
+
+## Files
 
 ```
 app.py                  — Streamlit UI
-report_generator.py     — All generation logic (no external API)
-reference_workbook.xlsx — Master data: MC MASTER, ITEM MASTER, TBGS PER CTN,
-                          routing map, layout structure
+report_generator.py     — generation logic
+reference_workbook.xlsx — template: the finished report
 requirements.txt
+README.md
 ```
 
-## How to deploy on Streamlit Cloud
+## Deploy on Streamlit Cloud
 
-1. Fork / push this repo to GitHub (make it **public** or connect your account).
-2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app**.
-3. Select your repo, branch `main`, main file `app.py`.
-4. Click **Deploy** — no secrets or environment variables needed.
-
-## How to use
-
-1. Open the app URL.
-2. Upload today's **Order Status Report** (`.xlsx`).
-3. Upload today's **Production Register** (`.xlsx`).
-4. Click **Generate Report** → download the `.xlsx`.
-
-## Updating master data
-
-The reference workbook is bundled with the app.
-When MC MASTER, ITEM MASTER, TBGS PER CTN, routing layout, or
-the ORDER VS WEEK DISTRIBUTION structure changes:
-
-1. Save the latest workbook as `reference_workbook.xlsx`.
-2. Replace the file in this repo and push — Streamlit Cloud
-   will auto-redeploy within a minute.
-
-## How the conversion works
-
-```
-Production Register (CTN)
-  × TBGS per CTN  (from TBGS PER CTN sheet, or derived from product name)
-  ÷ TBGS per CFC  (from MC MASTER)
-  ÷ CFC per Container  (from MC MASTER)
-= Achieved containers/week
-
-Order Status (Pending Prod in CFC)
-  ÷ CFC per Container  (item-specific from ITEM CFC PER CONTAINER,
-                         or machine-level from MC MASTER as fallback)
-= Pending containers/week  →  bucketed by Buyer Requested Shipment Date
-  (overdue orders pulled into current week)
-```
+1. Push this repo to GitHub
+2. [share.streamlit.io](https://share.streamlit.io) → **New app** → branch `main`, main file `app.py`
+3. **Deploy** — no secrets needed

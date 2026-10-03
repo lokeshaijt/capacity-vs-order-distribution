@@ -1,11 +1,10 @@
 """
-MC Capacity vs Order — Week-Wise Report
-Streamlit app: upload OSR + Production Register → download generated report
+Capacity vs Order Distribution
+Upload the Order Status Report (and last week's report to carry your routing) → download the report
 """
 
 import base64
 import datetime
-import io
 import pathlib
 
 import streamlit as st
@@ -18,11 +17,7 @@ ASSETS_DIR = pathlib.Path(__file__).parent / "assets"
 LOGO_PATH  = ASSETS_DIR / "jay_logo.jpg"
 _logo_img  = Image.open(LOGO_PATH) if LOGO_PATH.exists() else "📦"
 
-st.set_page_config(
-    page_title="MC Capacity vs Order Report",
-    page_icon=_logo_img,
-    layout="wide",
-)
+st.set_page_config(page_title="Capacity vs Order Distribution", page_icon=_logo_img, layout="wide")
 
 # ── JAY brand theme (black / gold, from the JAY logo) ───────────────────────────
 JAY_GOLD        = "#F2B90C"
@@ -123,9 +118,31 @@ st.markdown(f"""
         border-radius: 12px;
     }}
 
+    /* ── Metrics ──────────────────────────────────────────────────────── */
+    [data-testid="stMetric"] {{
+        background: {JAY_CHARCOAL};
+        border: 1px solid #3a2f13;
+        border-radius: 12px;
+        padding: 0.7rem 0.9rem;
+    }}
+    [data-testid="stMetricValue"] {{
+        color: {JAY_GOLD};
+    }}
+
     hr {{ border-color: #3a2f13 !important; }}
 </style>
 """, unsafe_allow_html=True)
+
+# ── Load reference workbook (bundled with the repo) ────────────────────────────
+REF_PATH = pathlib.Path(__file__).parent / "reference_workbook.xlsx"
+
+
+@st.cache_data(show_spinner=False)
+def _load_ref():
+    return REF_PATH.read_bytes()
+
+
+ref_bytes = _load_ref()
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 _logo_b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode() if LOGO_PATH.exists() else ""
@@ -133,127 +150,101 @@ st.markdown(f"""
 <div class="jay-header">
     {f'<img src="data:image/jpeg;base64,{_logo_b64}" />' if _logo_b64 else ''}
     <div>
-        <h1>MC Capacity vs Order — Week-Wise Report</h1>
-        <p>Upload the two source files and click <b>Generate Report</b> to download the updated workbook.</p>
+        <h1>Capacity vs Order Distribution</h1>
+        <p>Upload the <b>Order Status Report</b> and click <b>Generate</b>. The report shows pending orders in
+        containers by machine line, week by week for 12 weeks, against capacity (New capacity — Arul Sir), with
+        <b>Excess Order</b> and <b>Short Order</b> under every TOTAL. Sheets: ORDER VS WEEK DISTRIBUTION, AFRICA,
+        AUSTRALIA &amp; EUROPE, USA (the masters and WORKING are hidden).</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Load reference workbook (bundled with the repo) ────────────────────────────
-REF_PATH = pathlib.Path(__file__).parent / "reference_workbook.xlsx"
-
-@st.cache_data(show_spinner=False)
-def _load_ref():
-    return REF_PATH.read_bytes()
-
-ref_bytes = _load_ref()
-
 col1, col2 = st.columns(2)
-
 with col1:
     st.markdown('<div class="jay-card"><h3>1 · Order Status Report</h3>', unsafe_allow_html=True)
-    osr_file = st.file_uploader(
-        "Upload OrderStatusReport (.xlsx)",
-        type=["xlsx"],
-        key="osr",
-    )
+    osr_file = st.file_uploader("Upload OSR (.xlsx)", type=["xlsx"], key="osr")
     st.markdown('</div>', unsafe_allow_html=True)
-
 with col2:
-    st.markdown('<div class="jay-card"><h3>2 · Production Register</h3>', unsafe_allow_html=True)
-    pr_file = st.file_uploader(
-        "Upload Production Register (.xlsx)",
-        type=["xlsx"],
-        key="pr",
-    )
+    st.markdown('<div class="jay-card"><h3>2 · Last week\'s report</h3>', unsafe_allow_html=True)
+    prev_file = st.file_uploader(
+        "Optional — carries forward your MC ROUTING and Machines / Shifts", type=["xlsx"], key="prev")
+    st.caption("Without it, the routing bundled with the app is used.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Options ────────────────────────────────────────────────────────────────────
 with st.expander("⚙️ Options", expanded=False):
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        today_input = st.date_input(
-            "As-Of Date (today)",
-            value=datetime.date.today(),
-        )
-    with c2:
-        n_forward = st.number_input(
-            "Forward weeks to show",
-            min_value=4, max_value=26, value=12, step=1,
-        )
-    with c3:
-        n_achieved = st.number_input(
-            "Past weeks for Achieved Capacity",
-            min_value=2, max_value=8, value=4, step=1,
-        )
+    as_of = st.date_input(
+        "OSR date (As-Of)", value=datetime.date.today(),
+        help="The first week column is the week that contains this date. Orders due earlier are counted in it.")
 
-# ── Generate ────────────────────────────────────────────────────────────────────
-ready = osr_file is not None and pr_file is not None
-generate_btn = st.button("🚀 Generate Report", disabled=not ready, type="primary")
-
+st.divider()
+ready = osr_file is not None
+btn = st.button("🚀 Generate Report", disabled=not ready, type="primary")
 if not ready:
-    st.info("Please upload both files to enable the Generate button.")
+    st.info("Upload the Order Status Report to enable the Generate button.")
 
-if generate_btn and ready:
-    with st.spinner("Building report — this takes a few seconds…"):
+if btn and ready:
+    with st.spinner("Building report…"):
         try:
-            result_bytes, skipped = generate_report(
-                ref_bytes=ref_bytes,
+            result_bytes, info = generate_report(
                 osr_bytes=osr_file.read(),
-                pr_bytes=pr_file.read(),
-                today=today_input,
-                n_weeks_forward=int(n_forward),
-                n_weeks_achieved=int(n_achieved),
+                template_bytes=ref_bytes,
+                as_of=as_of,
+                prev_report_bytes=prev_file.read() if prev_file is not None else None,
             )
-
-            filename = (
-                f"MC_Capacity_vs_Order_"
-                f"{today_input.strftime('%d-%b-%Y')}.xlsx"
-            )
-
+            filename = f"Capacity_vs_Order_Distribution_{as_of.strftime('%d%b%Y')}.xlsx"
             st.success("✅ Report generated successfully!")
-
             st.download_button(
                 label="⬇️ Download Report",
                 data=result_bytes,
                 file_name=filename,
-                mime="application/vnd.openxmlformats-officedocument"
-                     ".spreadsheetml.sheet",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-            if skipped:
-                skipped_names = sorted({s[2] for s in skipped
-                                        if s[0] == "no_tbgs"})
-                no_factors    = sorted({s[1] for s in skipped
-                                        if s[0] == "no_factors"})
-                if skipped_names:
-                    st.warning(
-                        f"⚠️ **{len(skipped_names)} product(s) in the Production Register "
-                        f"could not be converted** (no TBGS/CTN conversion found). "
-                        f"Their production is excluded from the Achieved Capacity sheet.\n\n"
-                        + "\n".join(f"- {n}" for n in skipped_names[:20])
-                        + ("\n- …and more" if len(skipped_names) > 20 else "")
-                    )
-                if no_factors:
-                    st.warning(
-                        f"⚠️ **{len(no_factors)} machine line(s) have no capacity factors** "
-                        f"in MC MASTER — their rows are excluded.\n\n"
-                        + "\n".join(f"- {n}" for n in no_factors[:10])
-                    )
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Weeks shown", f"W #{info['first_week']} – W #{info['last_week']}")
+            m2.metric("Order rows / routed", f"{info['osr_rows']} / {info['routed_rows']}")
+            m3.metric("Containers in report", f"{info['containers_in_report']:,.1f}")
+            st.caption(
+                f"Routing taken from the {info['routing_source']}. "
+                f"A further {info['containers_after_last_week']:,.1f} containers are due after "
+                f"W #{info['last_week']} and are not shown.")
 
+            if info["inputs_changed"]:
+                st.info(
+                    "ℹ️ Machines / Shifts taken from your previous report (different from the app's defaults):\n\n"
+                    + "\n".join(f"- {n}: {o[0]} machines × {o[1]} shifts → {w[0]} × {w[1]}"
+                                for n, o, w in info["inputs_changed"]))
+            if info["new_products"]:
+                st.warning(
+                    f"⚠️ **{len(info['new_products'])} product(s) with pending orders have no MC ROUTING and were not seen "
+                    "before.** Unhide the WORKING sheet (right-click a tab → Unhide), type a route in column J, and they "
+                    "flow into the report:\n\n"
+                    + "\n".join(f"- {n}" for n in info["new_products"][:20])
+                    + ("\n- …and more" if len(info["new_products"]) > 20 else ""))
+            known_unrouted = [(n, c) for n, c in info["unrouted"] if n not in set(info["new_products"])]
+            if known_unrouted:
+                st.info(
+                    f"ℹ️ {len(known_unrouted)} product(s) have pending orders but no route "
+                    "(for example bulk lines) and are not counted:\n\n"
+                    + "\n".join(f"- {n}: {c:,.0f} CFC" for n, c in known_unrouted[:10])
+                    + ("\n- …and more" if len(known_unrouted) > 10 else ""))
+            if info["unknown_routes"]:
+                st.warning(
+                    "⚠️ These routes are not in the routing table (hidden columns T:U of ORDER VS WEEK DISTRIBUTION), "
+                    "so their orders are not counted:\n\n"
+                    + "\n".join(f"- {r}: {c:,.0f} CFC" for r, c in info["unknown_routes"][:10]))
         except Exception as exc:
             st.error(f"❌ Error generating report:\n\n```\n{exc}\n```")
             raise
 
-# ── Footer ─────────────────────────────────────────────────────────────────────
 st.divider()
 st.caption(
-    "Reference data (MC MASTER, ITEM MASTER, TBGS PER CTN, routing layout) "
-    "is bundled from the last saved workbook. "
-    "To update master data, re-deploy with a new `reference_workbook.xlsx`."
+    "**Containers** = pending CFC ÷ CFC per container (item-specific where listed, else the machine line's). "
+    "**Week** = the Monday of the order's requested date, or the first week if it is earlier. "
+    "**Capacity** = unit capacity × Machines × Shifts (editable yellow cells in the report)."
 )
 st.markdown(
     f'<p style="text-align:center; color:{JAY_GOLD_DARK}; '
-    f'font-size:0.78rem; letter-spacing:0.06em;">JAY · MC CAPACITY VS ORDER</p>',
+    f'font-size:0.78rem; letter-spacing:0.06em;">JAY · CAPACITY VS ORDER DISTRIBUTION</p>',
     unsafe_allow_html=True,
 )
