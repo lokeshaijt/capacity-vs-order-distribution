@@ -154,7 +154,7 @@ st.markdown(f"""
         <p>Upload the <b>Order Status Report</b> and click <b>Generate</b>. The report shows pending orders in
         containers by machine line, week by week for 12 weeks, against capacity (New capacity — Arul Sir), with
         <b>Excess Order</b> and <b>Short Order</b> under every TOTAL. Sheets: ORDER VS WEEK DISTRIBUTION (Zone →
-        Region → Sub → Machine Line), Zone 1, Zone 2, Zone 3 (the masters and WORKING are hidden).</p>
+        Region → Sub → Machine Line), AFRICA, AUSTRALIA &amp; EUROPE, USA (the masters and WORKING are hidden).</p>
     </div>
 </div>
 """, unsafe_allow_html=True)

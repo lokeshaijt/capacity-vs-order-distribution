@@ -10,23 +10,25 @@ The finalized report, with these sheets:
 | Sheet | Visible |
 |---|---|
 | `ORDER VS WEEK DISTRIBUTION` | yes — the main report, grouped **Zone → Region → Sub → Machine Line** |
-| `Zone 1` | yes — live mirror of the Zone 1 rows |
-| `Zone 2` | yes — live mirror of the Zone 2 rows |
-| `Zone 3` | yes — live mirror of the Zone 3 rows |
+| `AFRICA` | yes — mirrors AFRICA's rows from every zone it appears in |
+| `AUSTRALIA & EUROPE` | yes — mirrors AUSTRALIA's and EUROPE's rows from every zone they appear in |
+| `USA` | yes — mirrors USA's rows from every zone it appears in |
 | `ITEM MASTER` · `TBGS PER CTN` · `MC CAPACITY MASTER` · `MC MASTER` · `ITEM CFC PER CONTAINER` · `WORKING` · `MACHINE CAPACITY MASTER` | hidden (right-click a tab → Unhide) |
 
 - 12 week columns from the OSR week; pending orders in containers per machine line.
 - **Excess Order** / **Short Order** rows under every TOTAL (all four visible sheets).
 - Capacity is live (unit capacity × Machines × Shifts); change the yellow cells and everything recalculates.
 - Over-capacity weeks are red.
-- Each machine line belongs to exactly one Zone; regions can span more than one zone (e.g. AFRICA appears under
-  Zone 1, Zone 2 and Zone 3 for its different product lines).
+- Each machine line belongs to exactly one Zone; a region can span more than one zone (e.g. AFRICA appears under
+  Zone 1, Zone 2 and Zone 3 for its different product lines), so the AFRICA / AUSTRALIA & EUROPE / USA sheets each
+  stitch together that region's row-blocks from every zone, in zone order.
+- RUSSIA appears on `ORDER VS WEEK DISTRIBUTION` only (no dedicated mirror sheet).
 - Fonts, colours, column widths, hidden sheets and sheet names are exactly those of the template.
 
 ## How it works
 
 `reference_workbook.xlsx` is the finished report and is used as the **template**: layout, fonts, colour palette,
-zone sheets, hidden sheets, capacity master, lookups. Each run refreshes only what changes weekly:
+regional sheets, hidden sheets, capacity master, lookups. Each run refreshes only what changes weekly:
 
 | Refreshed | From |
 |---|---|
