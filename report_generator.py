@@ -13,7 +13,7 @@ Each run only refreshes what changes week to week:
     the routing bundled in the template)
   * Machines / Shifts, carried forward from the previous report when one is uploaded
 
-Everything else (capacity, Excess / Short rows, AFRICA / AUSTRALIA & EUROPE / USA sheets) is live formulas in the template.
+Everything else (capacity, Excess / Short rows, Zone 1 / Zone 2 / Zone 3 sheets) is live formulas in the template.
 To change the look, the masters or the capacity basis, replace reference_workbook.xlsx.
 """
 
@@ -32,7 +32,7 @@ WORKING = "WORKING"
 MC_MASTER = "MC MASTER"
 ITEM_CFC = "ITEM CFC PER CONTAINER"
 OSR_SHEET = "Order Status-By shipment Date"
-FIRST_WEEK_COL = 7                      # G
+FIRST_WEEK_COL = 8                      # H (A=Zone, B=Region, C=Sub, D=Machine Line, E=Machines, F=Shifts, G=Capacity)
 HELPER_ROW = 500                        # hidden row with the Monday of each week
 NON_LINE_LABELS = (None, "TOTAL", "Excess Order", "Short Order")
 
@@ -131,20 +131,20 @@ def read_line_inputs(ov):
     """{machine line: (machines, shifts)} from the yellow input cells of ORDER VS WEEK DISTRIBUTION."""
     out = {}
     for r in range(3, 120):
-        name = ov.cell(r, 3).value
+        name = ov.cell(r, 4).value
         if name in NON_LINE_LABELS:
             continue
-        m, s = ov.cell(r, 4).value, ov.cell(r, 5).value
+        m, s = ov.cell(r, 5).value, ov.cell(r, 6).value
         if isinstance(m, (int, float)) and isinstance(s, (int, float)):
             out[name] = (m, s)
     return out
 
 
 def routing_table(ov):
-    """{ROUTE UPPER: capacity group} from the hidden lookup in columns T:U of ORDER VS WEEK DISTRIBUTION."""
+    """{ROUTE UPPER: capacity group} from the hidden lookup in columns U:V of ORDER VS WEEK DISTRIBUTION."""
     out = {}
     for r in range(2, 120):
-        k, v = ov.cell(r, 20).value, ov.cell(r, 21).value
+        k, v = ov.cell(r, 21).value, ov.cell(r, 22).value
         if k and v:
             out[str(k)] = v
     return out
@@ -179,7 +179,7 @@ def build_working(wb, osr_rows, routes, table):
         x.font, x.fill, x.border = head_font, head_fill, border
         x.alignment = Alignment(horizontal="center", wrap_text=True)
 
-    wk0 = f"'{OVW}'!$G${HELPER_ROW}"
+    wk0 = f"'{OVW}'!$H${HELPER_ROW}"
     dvs, routed = {}, 0
     for i, (doc, buyer, contact, reqdate, plandate, pid, pname, oq, sip, rs, pend) in enumerate(osr_rows):
         r = i + 2
@@ -224,7 +224,7 @@ def build_working(wb, osr_rows, routes, table):
         ww.cell(r, 21, f"=N{r}*O{r}*T{r}").number_format = "#,##0"
         ww.cell(r, 22, f"=IF(ISNUMBER($D{r}),$D{r}-WEEKDAY($D{r},3),{wk0})").number_format = "dd-mmm-yy"
         ww.cell(r, 23, f"=MAX($V{r},{wk0})").number_format = "dd-mmm-yy"
-        ww.cell(r, 24, f"=IFERROR(VLOOKUP($J{r},'{OVW}'!$T:$U,2,0),\"\")")
+        ww.cell(r, 24, f"=IFERROR(VLOOKUP($J{r},'{OVW}'!$U:$V,2,0),\"\")")
         ic = f"VLOOKUP($I{r},'{ITEM_CFC}'!$A:$B,2,0)"
         mf = f"VLOOKUP($X{r},'{MC_MASTER}'!$A:$Q,16,0)"
         ww.cell(r, 25, f'=IFERROR($T{r}/IF(IFERROR({ic},0)>0,{ic},{mf}),"")')
@@ -305,14 +305,14 @@ def generate_report(osr_bytes, template_bytes, as_of=None, prev_report_bytes=Non
             prev_inputs = read_line_inputs(pw[OVW])
             mm = wb[MC_MASTER]
             for r in range(3, 120):
-                name = ov.cell(r, 3).value
+                name = ov.cell(r, 4).value
                 if name in NON_LINE_LABELS or name not in prev_inputs:
                     continue
-                old = (ov.cell(r, 4).value, ov.cell(r, 5).value)
+                old = (ov.cell(r, 5).value, ov.cell(r, 6).value)
                 new = prev_inputs[name]
                 if old != new:
                     inputs_changed.append((name, old, new))
-                    ov.cell(r, 4).value, ov.cell(r, 5).value = new
+                    ov.cell(r, 5).value, ov.cell(r, 6).value = new
                     for rr in range(3, mm.max_row + 1):
                         if mm.cell(rr, 1).value == name:
                             mm.cell(rr, 5).value, mm.cell(rr, 6).value = new
