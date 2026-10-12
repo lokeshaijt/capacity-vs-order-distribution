@@ -44,9 +44,11 @@ WORKING_HEADERS = [
     "Plan To Ship", "ITEM ID", "Column1", "PRODUCT NAME", "MC ROUTING", "CONCAT", "BLEND NAME", "SFG NAME",
     "NO OF CTN PER CFC", "NO OF TBGS PER CTN", "ORDER QTY", "STOCK IN PROCESS", "READY STOCK",
     "STOCK IN PROCESS + READY STOCK", "PENDING TO PRODUCE IN CASES", "PENDING TO PRODUCE IN TBGS",
-    "WEEK START", "REPORTING WEEK", "CAPACITY GROUP", "PENDING PROD IN CONTAINERS"]
+    "WEEK START", "REPORTING WEEK", "CAPACITY GROUP", "PENDING PROD IN CONTAINERS",
+    "PENDING ORDER QTY IN CONTAINERS"]
 WORKING_WIDTHS = {1: 24, 2: 16, 3: 22, 4: 13, 5: 9, 6: 13, 7: 9, 8: 22, 9: 42, 10: 22, 11: 22, 12: 24, 13: 30,
-                  14: 10, 15: 10, 16: 10, 17: 10, 18: 10, 19: 12, 20: 12, 21: 13, 22: 12, 23: 13, 24: 16, 25: 14}
+                  14: 10, 15: 10, 16: 10, 17: 10, 18: 10, 19: 12, 20: 12, 21: 13, 22: 12, 23: 13, 24: 16, 25: 14,
+                  26: 16}
 
 
 # ── Week numbering: continuous from the Monday of the week holding 1 Jan 2026 ─────────────────────────
@@ -141,10 +143,10 @@ def read_line_inputs(ov):
 
 
 def routing_table(ov):
-    """{ROUTE UPPER: capacity group} from the hidden lookup in columns U:V of ORDER VS WEEK DISTRIBUTION."""
+    """{ROUTE UPPER: capacity group} from the hidden lookup in columns AH:AI of ORDER VS WEEK DISTRIBUTION."""
     out = {}
     for r in range(2, 120):
-        k, v = ov.cell(r, 21).value, ov.cell(r, 22).value
+        k, v = ov.cell(r, 34).value, ov.cell(r, 35).value
         if k and v:
             out[str(k)] = v
     return out
@@ -224,7 +226,7 @@ def build_working(wb, osr_rows, routes, table):
         ww.cell(r, 21, f"=N{r}*O{r}*T{r}").number_format = "#,##0"
         ww.cell(r, 22, f"=IF(ISNUMBER($D{r}),$D{r}-WEEKDAY($D{r},3),{wk0})").number_format = "dd-mmm-yy"
         ww.cell(r, 23, f"=MAX($V{r},{wk0})").number_format = "dd-mmm-yy"
-        base_group = f"IFERROR(VLOOKUP($J{r},'{OVW}'!$U:$V,2,0),\"\")"
+        base_group = f"IFERROR(VLOOKUP($J{r},'{OVW}'!$AH:$AI,2,0),\"\")"
         ww.cell(r, 24, (
             f'=IF(AND({base_group}="CONSTANTA ENV (FLAVOUR & BLACK TEA)",'
             f'OR(ISNUMBER(SEARCH("KHAIMA",$I{r})),ISNUMBER(SEARCH("CRANBERRY",$I{r})))),'
@@ -232,14 +234,15 @@ def build_working(wb, osr_rows, routes, table):
         ic = f"VLOOKUP($I{r},'{ITEM_CFC}'!$A:$B,2,0)"
         mf = f"VLOOKUP($X{r},'{MC_MASTER}'!$A:$Q,16,0)"
         ww.cell(r, 25, f'=IFERROR($T{r}/IF(IFERROR({ic},0)>0,{ic},{mf}),"")')
-        for c in range(1, 26):
+        ww.cell(r, 26, f'=IFERROR($P{r}/IF(IFERROR({ic},0)>0,{ic},{mf}),"")')
+        for c in range(1, 27):
             ww.cell(r, c).border = border
             ww.cell(r, c).font = norm_font
     for col, w in WORKING_WIDTHS.items():
         ww.column_dimensions[L(col)].width = w
     ww.row_dimensions[1].height = 35.05
     ww.freeze_panes = "A2"
-    ww.auto_filter.ref = f"A1:Y{len(osr_rows) + 1}"             # filter buttons on the header row, as in the template
+    ww.auto_filter.ref = f"A1:Z{len(osr_rows) + 1}"             # filter buttons on the header row, as in the template
     return len(osr_rows), routed
 
 
