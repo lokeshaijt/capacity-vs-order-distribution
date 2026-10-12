@@ -224,7 +224,11 @@ def build_working(wb, osr_rows, routes, table):
         ww.cell(r, 21, f"=N{r}*O{r}*T{r}").number_format = "#,##0"
         ww.cell(r, 22, f"=IF(ISNUMBER($D{r}),$D{r}-WEEKDAY($D{r},3),{wk0})").number_format = "dd-mmm-yy"
         ww.cell(r, 23, f"=MAX($V{r},{wk0})").number_format = "dd-mmm-yy"
-        ww.cell(r, 24, f"=IFERROR(VLOOKUP($J{r},'{OVW}'!$U:$V,2,0),\"\")")
+        base_group = f"IFERROR(VLOOKUP($J{r},'{OVW}'!$U:$V,2,0),\"\")"
+        ww.cell(r, 24, (
+            f'=IF(AND({base_group}="CONSTANTA ENV (FLAVOUR & BLACK TEA)",'
+            f'OR(ISNUMBER(SEARCH("KHAIMA",$I{r})),ISNUMBER(SEARCH("CRANBERRY",$I{r})))),'
+            f'"CONSTANTA ENV (HERBAL)",{base_group})'))
         ic = f"VLOOKUP($I{r},'{ITEM_CFC}'!$A:$B,2,0)"
         mf = f"VLOOKUP($X{r},'{MC_MASTER}'!$A:$Q,16,0)"
         ww.cell(r, 25, f'=IFERROR($T{r}/IF(IFERROR({ic},0)>0,{ic},{mf}),"")')
@@ -253,6 +257,8 @@ def estimate_containers(osr_rows, routes, table, item_cfc, line_cfc, cur_mon, n_
         group = group_of.get(str(route).upper()) if route else None
         if not group:
             continue
+        if group == "CONSTANTA ENV (FLAVOUR & BLACK TEA)" and ("KHAIMA" in str(pname).upper() or "CRANBERRY" in str(pname).upper()):
+            group = "CONSTANTA ENV (HERBAL)"
         per = item_cfc.get(str(pname).upper()) or line_cfc.get(group)
         if not per:
             continue
