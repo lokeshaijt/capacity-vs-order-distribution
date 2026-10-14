@@ -153,10 +153,10 @@ st.markdown(f"""
         <h1>Capacity vs Order Distribution</h1>
         <p>Upload the <b>Order Status Report</b> and click <b>Generate</b>. The report shows pending orders in
         containers by machine line, grouped by month and week, against capacity, with <b>Excess Order</b> and
-        <b>Short Order</b> under every TOTAL. Sheets: MONTH WISE - PENDING PROD and MONTH WISE - ORDER QTY
-        (Zone → Region → Sub → Machine Line, rolling 4 months from the current month, weeks grouped per month),
-        AFRICA, AUSTRALIA &amp; EUROPE, USA (based on Order Qty). The masters, WORKING and ORDER VS WEEK
-        DISTRIBUTION are hidden — unhide a tab from Excel's right-click menu if you need them.</p>
+        <b>Short Order</b> under every TOTAL. Sheets: ORDER QTY and PENDING PROD (Zone → Region → Sub → Machine
+        Line, rolling 4 months from the current month, weeks grouped per month), AFR, AUS&amp;EU, USA (based on
+        Order Qty). The masters, WORKING and ORDER VS WEEK DISTRIBUTION are hidden — unhide a tab from Excel's
+        right-click menu if you need them.</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
