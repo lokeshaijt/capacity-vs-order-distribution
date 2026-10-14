@@ -1,28 +1,36 @@
 """
 MC Capacity vs Order — report generator
 ========================================
-Order Status Report (OSR)  ->  containers per machine line per week, against capacity.
+Order Status Report (OSR)  ->  containers per machine line per month/week, against capacity.
 
-The report is produced from a *template*: the bundled reference_workbook.xlsx is the finished report
-(layout, colour palette, Excess / Short Order rows, regional sheets, capacity master, lookups).
-Each run only refreshes what changes week to week:
+The report is produced from a *template*: the bundled reference_workbook.xlsx carries the masters,
+capacity lookups and the hidden ORDER VS WEEK DISTRIBUTION sheet, which is the internal "engine" —
+it is not shown to the user, but every other sheet pulls its Zone/Region/Sub/Machine Line/Machines/
+Shifts/Capacity rows and its two 12-week basis blocks (Based on Pending Production, Based on Order
+Qty) from it via live formulas. Each run refreshes:
 
-  * the 12 week columns (W # headers and the hidden week-Monday row 500 in ORDER VS WEEK DISTRIBUTION)
+  * ORDER VS WEEK DISTRIBUTION's 12 week columns (hidden; W # headers + helper row 500)
   * the WORKING sheet, rebuilt from the new OSR
+  * MONTH WISE - PENDING PROD and MONTH WISE - ORDER QTY, rebuilt fresh each run: a rolling 4-month
+    window starting at the current month, weeks grouped (collapsible) under each month, a part-elapsed
+    current month only showing its remaining weeks
   * MC ROUTING in WORKING, carried forward by PRODUCT NAME (from the previous report you upload, else
     the routing bundled in the template)
   * Machines / Shifts, carried forward from the previous report when one is uploaded
 
-Everything else (capacity, Excess / Short rows, Zone 1 / Zone 2 / Zone 3 sheets) is live formulas in the template.
-To change the look, the masters or the capacity basis, replace reference_workbook.xlsx.
+AFRICA / AUSTRALIA & EUROPE / USA show only the Order Qty basis, via live formulas into the hidden
+ORDER VS WEEK DISTRIBUTION sheet. To change the look, the masters or the capacity basis, replace
+reference_workbook.xlsx.
 """
 
 import collections
+import copy
 import datetime
 import io
 import re
 
 import openpyxl
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter as L
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -35,6 +43,12 @@ OSR_SHEET = "Order Status-By shipment Date"
 FIRST_WEEK_COL = 8                      # H (A=Zone, B=Region, C=Sub, D=Machine Line, E=Machines, F=Shifts, G=Capacity)
 HELPER_ROW = 500                        # hidden row with the Monday of each week
 NON_LINE_LABELS = (None, "TOTAL", "Excess Order", "Short Order")
+
+MONTH_SHEETS = [                        # (sheet name, WORKING column holding the basis, in containers)
+    ("MONTH WISE - PENDING PROD", "Y"),
+    ("MONTH WISE - ORDER QTY", "Z"),
+]
+N_MONTH_WINDOW = 4                      # rolling months shown, starting at the current month
 
 # Spellings that are accepted in MC ROUTING but are not offered in the dropdown
 ROUTE_ALIASES = {"CONSTANTA TAG D", "MD 20 4GM", "PEARL PACK PREMIX"}
@@ -275,6 +289,179 @@ def estimate_containers(osr_rows, routes, table, item_cfc, line_cfc, cur_mon, n_
     return per_week, after
 
 
+# ── MONTH WISE sheets: rolling N-month window, grouped by week ───────────────────────────────────────
+
+def month_window(cur_mon, n_months=N_MONTH_WINDOW):
+    """[(label, [(week_num, monday_date), ...]), ...] for n_months starting at the current month.
+    A week belongs to the month holding its Monday; a part-elapsed current month only lists the
+    weeks from today's week onward (e.g. "October" on 14 Oct 2026 lists weeks 42, 43, 44 only)."""
+    months = []
+    y, m = cur_mon.year, cur_mon.month
+    for i in range(n_months):
+        mm = (m - 1 + i) % 12 + 1
+        yy = y + (m - 1 + i) // 12
+        start = datetime.date(yy, mm, 1)
+        end = datetime.date(yy + 1, 1, 1) if mm == 12 else datetime.date(yy, mm + 1, 1)
+        seen, weeks = set(), []
+        d = start
+        while d < end:
+            mon = monday_of(d)
+            if mon not in seen and mon >= cur_mon and mon.month == mm and mon.year == yy:
+                seen.add(mon)
+                weeks.append((weeknum(mon), mon))
+            d += datetime.timedelta(days=1)
+        weeks.sort(key=lambda t: t[1])
+        months.append((start.strftime("%B %Y").upper(), weeks))
+    return months
+
+
+def _style_of(cell):
+    return dict(font=copy.copy(cell.font), fill=copy.copy(cell.fill), border=copy.copy(cell.border),
+                alignment=copy.copy(cell.alignment), number_format=cell.number_format)
+
+
+def _apply(cell, st):
+    cell.font, cell.fill, cell.border = st["font"], st["fill"], st["border"]
+    cell.alignment, cell.number_format = st["alignment"], st["number_format"]
+
+
+def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, n_months=N_MONTH_WINDOW):
+    """(Re)build a month + week wise sheet, grouped by month, summed from WORKING's basis_col
+    (containers), mirroring every line from the hidden ORDER VS WEEK DISTRIBUTION sheet."""
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ms = wb.create_sheet(sheet_name, wb.sheetnames.index(OVW) + 1)
+
+    last_row = 2
+    for r in range(3, 300):
+        if any(ov.cell(r, c).value not in (None, "") for c in (1, 2, 3, 4)):
+            last_row = r
+        else:
+            break
+
+    st_title = _style_of(ov["A1"])
+    st_band = _style_of(ov["H1"])
+    st_colhdr = _style_of(ov["A2"])
+    st_colhdr_wk = _style_of(ov["H2"])
+    st_zone, st_region, st_sub = _style_of(ov["A3"]), _style_of(ov["B3"]), _style_of(ov["C3"])
+    st_line, st_mach, st_shift, st_cap = _style_of(ov["D3"]), _style_of(ov["E3"]), _style_of(ov["F3"]), _style_of(ov["G3"])
+    st_week = _style_of(ov["H3"])
+    st_total_lbl, st_total_oth = _style_of(ov["D8"]), _style_of(ov["A8"])
+    st_total_cap, st_total_wk = _style_of(ov["G8"]), _style_of(ov["H8"])
+
+    months = month_window(cur_mon, n_months)
+
+    COL_CAP_MONTHLY = 8
+    col = COL_CAP_MONTHLY + 1
+    blocks = []                                               # (label, first_col, last_col, weeks, total_col)
+    for label, weeks in months:
+        first = col
+        last = first + max(len(weeks), 1) - 1
+        total_col = last + 1
+        blocks.append((label, first, last, weeks, total_col))
+        col = total_col + 2                                   # one spacer column before the next month
+
+    ms.merge_cells(start_row=1, start_column=1, end_row=1, end_column=COL_CAP_MONTHLY)
+    _apply(ms.cell(1, 1, "Month & Week Wise Distribution"), st_title)
+    for c in range(2, COL_CAP_MONTHLY + 1):
+        _apply(ms.cell(1, c), st_title)
+    for label, first, last, weeks, total_col in blocks:
+        ms.merge_cells(start_row=1, start_column=first, end_row=1, end_column=total_col)
+        _apply(ms.cell(1, first, label), st_band)
+        for c in range(first, total_col + 1):
+            _apply(ms.cell(1, c), st_band)
+
+    headers_ag = ["Zone", "Region", None, "Machine Line", "No. of Machines", "No. of Shifts",
+                  "Weekly Capacity(In containers)"]
+    for c, h in enumerate(headers_ag, 1):
+        _apply(ms.cell(2, c, h), st_colhdr)
+    _apply(ms.cell(2, COL_CAP_MONTHLY, "Monthly Capacity"), st_colhdr_wk)
+    for label, first, last, weeks, total_col in blocks:
+        for i, (wn, _) in enumerate(weeks):
+            _apply(ms.cell(2, first + i, f"W #{wn}"), st_colhdr_wk)
+        _apply(ms.cell(2, total_col, label.title() + " Total"), st_colhdr_wk)
+
+    def owning_row_map(col_idx):
+        m = {}
+        for rng in ov.merged_cells.ranges:
+            if rng.min_col == col_idx and rng.max_col == col_idx and rng.min_row >= 3:
+                for r in range(rng.min_row, rng.max_row + 1):
+                    m[r] = rng.min_row
+        return m
+
+    zone_owner, region_owner, sub_owner = owning_row_map(1), owning_row_map(2), owning_row_map(3)
+    total_re = re.compile(r"=SUM\(([A-Z]+)(\d+):\1(\d+)\)")
+
+    for r in range(3, last_row + 1):
+        label = ov.cell(r, 4).value
+        is_total = label == "TOTAL"
+        zo, ro, so = zone_owner.get(r, r), region_owner.get(r, r), sub_owner.get(r, r)
+        _apply(ms.cell(r, 1, f"=IF('{OVW}'!A{zo}=\"\",\"\",'{OVW}'!A{zo})"), st_total_oth if is_total else st_zone)
+        _apply(ms.cell(r, 2, f"=IF('{OVW}'!B{ro}=\"\",\"\",'{OVW}'!B{ro})"), st_total_oth if is_total else st_region)
+        _apply(ms.cell(r, 3, f"=IF('{OVW}'!C{so}=\"\",\"\",'{OVW}'!C{so})"), st_total_oth if is_total else st_sub)
+        _apply(ms.cell(r, 4, f"=IF('{OVW}'!D{r}=\"\",\"\",'{OVW}'!D{r})"), st_total_lbl if is_total else st_line)
+        _apply(ms.cell(r, 5, f"=IF('{OVW}'!E{r}=\"\",\"\",'{OVW}'!E{r})"), st_total_oth if is_total else st_mach)
+        _apply(ms.cell(r, 6, f"=IF('{OVW}'!F{r}=\"\",\"\",'{OVW}'!F{r})"), st_total_oth if is_total else st_shift)
+        _apply(ms.cell(r, 7, f"=IF('{OVW}'!G{r}=\"\",\"\",'{OVW}'!G{r})"), st_total_cap if is_total else st_cap)
+        _apply(ms.cell(r, COL_CAP_MONTHLY, f'=IF(ISNUMBER($G{r}),$G{r}*4,$G{r})'),
+               st_total_cap if is_total else st_cap)
+
+        for label_, first, last, weeks, total_col in blocks:
+            for i, (wn, wmon) in enumerate(weeks):
+                c = first + i
+                if label == "TOTAL":
+                    m = total_re.match(str(ov.cell(r, FIRST_WEEK_COL).value))
+                    formula, st = f"=SUM({L(c)}{m.group(2)}:{L(c)}{m.group(3)})", st_total_wk
+                elif label == "Excess Order":
+                    tr = r - 1
+                    formula = f'=IFERROR(IF(ROUND({L(c)}{tr}-$G{tr},3)>0,ROUND({L(c)}{tr}-$G{tr},3),""),"")'
+                    st = _style_of(ov.cell(r, FIRST_WEEK_COL))
+                elif label == "Short Order":
+                    tr = r - 2
+                    formula = f'=IFERROR(IF(ROUND($G{tr}-{L(c)}{tr},3)>0,ROUND($G{tr}-{L(c)}{tr},3),""),"")'
+                    st = _style_of(ov.cell(r, FIRST_WEEK_COL))
+                else:
+                    formula = (f'=IFERROR(SUMIFS(WORKING!${basis_col}:${basis_col},WORKING!$X:$X,$D{r},'
+                               f'WORKING!$W:$W,DATE({wmon.year},{wmon.month},{wmon.day})),"")')
+                    st = st_week
+                _apply(ms.cell(r, c, formula), st)
+            tot_st = st_total_wk if is_total else st_week
+            if weeks:
+                _apply(ms.cell(r, total_col, f"=SUM({L(first)}{r}:{L(last)}{r})"), tot_st)
+            else:
+                _apply(ms.cell(r, total_col, 0), tot_st)
+
+    col_widths = {1: 8, 2: 9, 3: 9, 4: 26, 5: 7, 6: 7, 7: 9}
+    for c, w in col_widths.items():
+        ms.column_dimensions[L(c)].width = w
+    ms.column_dimensions[L(COL_CAP_MONTHLY)].width = 9
+    for label, first, last, weeks, total_col in blocks:
+        for c in range(first, last + 1):
+            ms.column_dimensions[L(c)].width = 6
+            ms.column_dimensions[L(c)].outlineLevel = 1
+        ms.column_dimensions[L(total_col)].width = 10
+
+    ms.sheet_properties.outlinePr.summaryRight = True
+    red_font = Font(name="Trebuchet MS", color="FFCC0000", size=11)
+    for label, first, last, weeks, total_col in blocks:
+        if not weeks:
+            continue
+        rng = f"{L(first)}3:{L(last)}{last_row}"
+        formula = f"AND(ISNUMBER({L(first)}3),ISNUMBER($G3),$G3>0,{L(first)}3>$G3)"
+        ms.conditional_formatting.add(rng, FormulaRule(formula=[formula], font=red_font))
+
+    for rng in ov.merged_cells.ranges:
+        if rng.min_row < 3 or rng.min_col not in (1, 2, 3) or rng.max_row > last_row:
+            continue
+        ms.merge_cells(start_row=rng.min_row, start_column=rng.min_col, end_row=rng.max_row, end_column=rng.max_col)
+
+    ms.freeze_panes = "A3"
+    ms.sheet_view.showGridLines = False
+    ms.row_dimensions[1].height = ov.row_dimensions[1].height
+    ms.row_dimensions[2].height = ov.row_dimensions[2].height
+    return ms
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────────────────────────────
 
 def generate_report(osr_bytes, template_bytes, as_of=None, prev_report_bytes=None):
@@ -345,6 +532,10 @@ def generate_report(osr_bytes, template_bytes, as_of=None, prev_report_bytes=Non
     osr_rows = extract_osr(openpyxl.load_workbook(io.BytesIO(osr_bytes), data_only=True))
     n_rows, n_routed = build_working(wb, osr_rows, routes, table)
 
+    # --- MONTH WISE sheets: rolling N-month window, rebuilt fresh every run
+    for sheet_name, basis_col in MONTH_SHEETS:
+        build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon)
+
     # --- estimate for the app (same arithmetic as the formulas)
     wv = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=True)
     item_cfc = {}
@@ -372,10 +563,11 @@ def generate_report(osr_bytes, template_bytes, as_of=None, prev_report_bytes=Non
         elif str(route).upper() not in group_of:
             unknown_route[str(route)] += pend
 
-    # --- only the report tab is selected (otherwise Excel opens with grouped sheets)
+    # --- only the landing tab is selected (otherwise Excel opens with grouped sheets); OVW stays hidden
+    landing = MONTH_SHEETS[0][0]
     for ws in wb.worksheets:
-        ws.sheet_view.tabSelected = (ws.title == OVW)
-    wb.active = wb.sheetnames.index(OVW)
+        ws.sheet_view.tabSelected = (ws.title == landing)
+    wb.active = wb.sheetnames.index(landing)
 
     buf = io.BytesIO()
     wb.save(buf)

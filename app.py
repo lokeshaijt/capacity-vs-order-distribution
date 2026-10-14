@@ -152,9 +152,11 @@ st.markdown(f"""
     <div>
         <h1>Capacity vs Order Distribution</h1>
         <p>Upload the <b>Order Status Report</b> and click <b>Generate</b>. The report shows pending orders in
-        containers by machine line, week by week for 12 weeks, against capacity (New capacity — Arul Sir), with
-        <b>Excess Order</b> and <b>Short Order</b> under every TOTAL. Sheets: ORDER VS WEEK DISTRIBUTION (Zone →
-        Region → Sub → Machine Line), AFRICA, AUSTRALIA &amp; EUROPE, USA (the masters and WORKING are hidden).</p>
+        containers by machine line, grouped by month and week, against capacity, with <b>Excess Order</b> and
+        <b>Short Order</b> under every TOTAL. Sheets: MONTH WISE - PENDING PROD and MONTH WISE - ORDER QTY
+        (Zone → Region → Sub → Machine Line, rolling 4 months from the current month, weeks grouped per month),
+        AFRICA, AUSTRALIA &amp; EUROPE, USA (based on Order Qty). The masters, WORKING and ORDER VS WEEK
+        DISTRIBUTION are hidden — unhide a tab from Excel's right-click menu if you need them.</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -201,7 +203,7 @@ if btn and ready:
             )
 
             m1, m2, m3 = st.columns(3)
-            m1.metric("Weeks shown", f"W #{info['first_week']} – W #{info['last_week']}")
+            m1.metric("Weeks covered", f"W #{info['first_week']} – W #{info['last_week']}")
             m2.metric("Order rows / routed", f"{info['osr_rows']} / {info['routed_rows']}")
             m3.metric("Containers in report", f"{info['containers_in_report']:,.1f}")
             st.caption(
@@ -230,7 +232,7 @@ if btn and ready:
                     + ("\n- …and more" if len(known_unrouted) > 10 else ""))
             if info["unknown_routes"]:
                 st.warning(
-                    "⚠️ These routes are not in the routing table (hidden columns T:U of ORDER VS WEEK DISTRIBUTION), "
+                    "⚠️ These routes are not in the routing table (hidden columns AH:AI of ORDER VS WEEK DISTRIBUTION), "
                     "so their orders are not counted:\n\n"
                     + "\n".join(f"- {r}: {c:,.0f} CFC" for r, c in info["unknown_routes"][:10]))
         except Exception as exc:
