@@ -88,6 +88,18 @@ def monday_of(d):
     return d - datetime.timedelta(days=d.weekday())
 
 
+def week_of_year(d):
+    """Display week number. For the app's anchor year this matches weeknum() (the existing
+    continuous numbering); for any later year it resets to 1 at the Monday on/after 1 Jan of
+    d's own year, so a block that crosses into a new calendar year starts labelling from W #1."""
+    if d.year == _J1.year:
+        return weeknum(d)
+    j1 = datetime.date(d.year, 1, 1)
+    w1 = j1 if j1.weekday() == 0 else j1 + datetime.timedelta(days=7 - j1.weekday())
+    mon = monday_of(d)
+    return ((mon - w1).days // 7) + 1
+
+
 def _norm(x):
     """Product-name key: case, repeated and non-breaking spaces ignored."""
     return re.sub(r"\s+", " ", str(x).replace("\xa0", " ")).strip().upper()
@@ -247,7 +259,7 @@ def build_working(wb, osr_rows, routes, table):
         ww.cell(r, 23, f"=MAX($V{r},{wk0})").number_format = "dd-mmm-yy"
         base_group = f"IFERROR(VLOOKUP($J{r},'{OVW}'!$AH:$AI,2,0),\"\")"
         ww.cell(r, 24, (
-            f'=IF(AND({base_group}="CONSTANTA ENV (FLAVOUR & BLACK TEA)",'
+            f'=IF(AND({base_group}="CONSTANTA ENV",'
             f'OR(ISNUMBER(SEARCH("KHAIMA",$I{r})),ISNUMBER(SEARCH("CRANBERRY",$I{r})))),'
             f'"CONSTANTA ENV (HERBAL)",{base_group})'))
         ic = f"VLOOKUP($I{r},'{ITEM_CFC}'!$A:$B,2,0)"
@@ -279,7 +291,7 @@ def estimate_containers(osr_rows, routes, table, item_cfc, line_cfc, cur_mon, n_
         group = group_of.get(str(route).upper()) if route else None
         if not group:
             continue
-        if group == "CONSTANTA ENV (FLAVOUR & BLACK TEA)" and ("KHAIMA" in str(pname).upper() or "CRANBERRY" in str(pname).upper()):
+        if group == "CONSTANTA ENV" and ("KHAIMA" in str(pname).upper() or "CRANBERRY" in str(pname).upper()):
             group = "CONSTANTA ENV (HERBAL)"
         per = item_cfc.get(str(pname).upper()) or line_cfc.get(group)
         if not per:
@@ -394,12 +406,15 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
         blocks.append((label, first, last, weeks, total_col))
         col = total_col + 2                                   # one spacer column before the next month
 
+    basis_label = {"Z": "ORDER QTY", "Y": "PENDING PROD"}.get(basis_col, basis_col)
     ms.merge_cells(start_row=1, start_column=1, end_row=1, end_column=COL_CAP_MONTHLY)
-    _apply(ms.cell(1, 1, f"Month & Week Wise Distribution - Generated on {as_of:%d/%m/%Y}"), st_title)
+    _apply(ms.cell(1, 1, f"Month & Week Wise Distribution - Generated on {as_of:%d/%m/%Y} - {basis_label}"), st_title)
     for c in range(2, COL_CAP_MONTHLY + 1):
         _apply(ms.cell(1, c), st_title)
     for label, first, last, weeks, total_col in blocks:
         ms.merge_cells(start_row=1, start_column=first, end_row=1, end_column=total_col)
+        abbrev = weeks[0][1].strftime("%b").upper() if weeks else label[:3]
+        _apply(ms.cell(1, first, abbrev), st_band)
         for c in range(first, total_col + 1):
             _apply(ms.cell(1, c), st_band)
 
@@ -408,8 +423,8 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
         _apply(ms.cell(2, c, h), st_colhdr)
     _apply(ms.cell(2, COL_CAP_MONTHLY, "Month Capacity"), st_colhdr_wk)
     for label, first, last, weeks, total_col in blocks:
-        for i, (wn, _) in enumerate(weeks):
-            _apply(ms.cell(2, first + i, f"W #{wn}"), st_colhdr_wk)
+        for i, (wn, wmon) in enumerate(weeks):
+            _apply(ms.cell(2, first + i, f"W #{week_of_year(wmon)}"), st_colhdr_wk)
         abbrev = weeks[0][1].strftime("%b").upper() if weeks else label[:3]
         _apply(ms.cell(2, total_col, abbrev), st_colhdr_wk)
 
