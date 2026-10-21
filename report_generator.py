@@ -49,7 +49,11 @@ MONTH_SHEETS = [                        # (sheet name, WORKING column holding th
     ("PENDING PROD", "Y"),
 ]
 N_MONTH_WINDOW = 4                      # rolling months shown, starting at the current month
-REGION_SHEETS = ["AFR", "AUS&EU", "USA"]
+REGION_SHEETS = [                       # (sheet name, Region values from OVW column B to include)
+    ("AFR", {"AFRICA"}),
+    ("AUS&EU", {"AUSTRALIA", "EUROPE"}),
+    ("USA", {"USA"}),
+]
 
 # Spellings that are accepted in MC ROUTING but are not offered in the dropdown
 ROUTE_ALIASES = {"CONSTANTA TAG D", "MD 20 4GM", "PEARL PACK PREMIX"}
@@ -329,9 +333,13 @@ def _apply(cell, st):
     cell.alignment, cell.number_format = st["alignment"], st["number_format"]
 
 
-def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_after=OVW, n_months=N_MONTH_WINDOW):
+def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_after=OVW, n_months=N_MONTH_WINDOW,
+                       region_filter=None):
     """(Re)build a month + week wise sheet, grouped by month, summed from WORKING's basis_col
-    (containers), mirroring every line from the hidden ORDER VS WEEK DISTRIBUTION sheet."""
+    (containers), mirroring every line from the hidden ORDER VS WEEK DISTRIBUTION sheet.
+    region_filter, if given, is a set of Region values (OVW column B) to include, keeping each
+    matched block's internal row order but dropping everything else (used for the AFR/AUS&EU/USA
+    sheets)."""
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     insert_at = wb.sheetnames.index(insert_after) + 1
@@ -343,6 +351,24 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
             last_row = r
         else:
             break
+
+    def owning_row_map(col_idx):
+        m = {}
+        for rng in ov.merged_cells.ranges:
+            if rng.min_col == col_idx and rng.max_col == col_idx and rng.min_row >= 3:
+                for r in range(rng.min_row, rng.max_row + 1):
+                    m[r] = rng.min_row
+        return m
+
+    zone_owner, region_owner, sub_owner = owning_row_map(1), owning_row_map(2), owning_row_map(3)
+
+    if region_filter is None:
+        src_rows = list(range(3, last_row + 1))
+    else:
+        src_rows = [r for r in range(3, last_row + 1)
+                    if ov.cell(region_owner.get(r, r), 2).value in region_filter]
+    dest_of = {src_r: i + 3 for i, src_r in enumerate(src_rows)}
+    last_dest_row = 2 + len(src_rows)
 
     st_title = _style_of(ov["A1"])
     st_band = _style_of(ov["H1"])
@@ -387,28 +413,20 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
         abbrev = weeks[0][1].strftime("%b").upper() if weeks else label[:3]
         _apply(ms.cell(2, total_col, abbrev), st_colhdr_wk)
 
-    def owning_row_map(col_idx):
-        m = {}
-        for rng in ov.merged_cells.ranges:
-            if rng.min_col == col_idx and rng.max_col == col_idx and rng.min_row >= 3:
-                for r in range(rng.min_row, rng.max_row + 1):
-                    m[r] = rng.min_row
-        return m
-
-    zone_owner, region_owner, sub_owner = owning_row_map(1), owning_row_map(2), owning_row_map(3)
     total_re = re.compile(r"=SUM\(([A-Z]+)(\d+):\1(\d+)\)")
 
-    for r in range(3, last_row + 1):
-        label = ov.cell(r, 4).value
+    for src_r in src_rows:
+        r = dest_of[src_r]
+        label = ov.cell(src_r, 4).value
         is_total = label == "TOTAL"
-        zo, ro, so = zone_owner.get(r, r), region_owner.get(r, r), sub_owner.get(r, r)
+        zo, ro, so = zone_owner.get(src_r, src_r), region_owner.get(src_r, src_r), sub_owner.get(src_r, src_r)
         _apply(ms.cell(r, 1, f"=IF('{OVW}'!A{zo}=\"\",\"\",'{OVW}'!A{zo})"), st_total_oth if is_total else st_zone)
         _apply(ms.cell(r, 2, f"=IF('{OVW}'!B{ro}=\"\",\"\",'{OVW}'!B{ro})"), st_total_oth if is_total else st_region)
         _apply(ms.cell(r, 3, f"=IF('{OVW}'!C{so}=\"\",\"\",'{OVW}'!C{so})"), st_total_oth if is_total else st_sub)
-        _apply(ms.cell(r, 4, f"=IF('{OVW}'!D{r}=\"\",\"\",'{OVW}'!D{r})"), st_total_lbl if is_total else st_line)
-        _apply(ms.cell(r, 5, f"=IF('{OVW}'!E{r}=\"\",\"\",'{OVW}'!E{r})"), st_total_oth if is_total else st_mach)
-        _apply(ms.cell(r, 6, f"=IF('{OVW}'!F{r}=\"\",\"\",'{OVW}'!F{r})"), st_total_oth if is_total else st_shift)
-        _apply(ms.cell(r, 7, f"=IF('{OVW}'!G{r}=\"\",\"\",'{OVW}'!G{r})"), st_total_cap if is_total else st_cap)
+        _apply(ms.cell(r, 4, f"=IF('{OVW}'!D{src_r}=\"\",\"\",'{OVW}'!D{src_r})"), st_total_lbl if is_total else st_line)
+        _apply(ms.cell(r, 5, f"=IF('{OVW}'!E{src_r}=\"\",\"\",'{OVW}'!E{src_r})"), st_total_oth if is_total else st_mach)
+        _apply(ms.cell(r, 6, f"=IF('{OVW}'!F{src_r}=\"\",\"\",'{OVW}'!F{src_r})"), st_total_oth if is_total else st_shift)
+        _apply(ms.cell(r, 7, f"=IF('{OVW}'!G{src_r}=\"\",\"\",'{OVW}'!G{src_r})"), st_total_cap if is_total else st_cap)
         _apply(ms.cell(r, COL_CAP_MONTHLY, f'=IF(ISNUMBER($G{r}),$G{r}*4,$G{r})'),
                st_total_cap if is_total else st_cap)
 
@@ -416,16 +434,17 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
             for i, (wn, wmon) in enumerate(weeks):
                 c = first + i
                 if label == "TOTAL":
-                    m = total_re.match(str(ov.cell(r, FIRST_WEEK_COL).value))
-                    formula, st = f"=SUM({L(c)}{m.group(2)}:{L(c)}{m.group(3)})", st_total_wk
+                    m = total_re.match(str(ov.cell(src_r, FIRST_WEEK_COL).value))
+                    dr1, dr2 = dest_of[int(m.group(2))], dest_of[int(m.group(3))]
+                    formula, st = f"=SUM({L(c)}{dr1}:{L(c)}{dr2})", st_total_wk
                 elif label == "Excess Order":
                     tr = r - 1
                     formula = f'=IFERROR(IF(ROUND({L(c)}{tr}-$G{tr},3)>0,ROUND({L(c)}{tr}-$G{tr},3),""),"")'
-                    st = _style_of(ov.cell(r, FIRST_WEEK_COL), size=10)
+                    st = _style_of(ov.cell(src_r, FIRST_WEEK_COL), size=10)
                 elif label == "Short Order":
                     tr = r - 2
                     formula = f'=IFERROR(IF(ROUND($G{tr}-{L(c)}{tr},3)>0,ROUND($G{tr}-{L(c)}{tr},3),""),"")'
-                    st = _style_of(ov.cell(r, FIRST_WEEK_COL), size=10)
+                    st = _style_of(ov.cell(src_r, FIRST_WEEK_COL), size=10)
                 else:
                     formula = (f'=IFERROR(SUMIFS(WORKING!${basis_col}:${basis_col},WORKING!$X:$X,$D{r},'
                                f'WORKING!$W:$W,DATE({wmon.year},{wmon.month},{wmon.day})),"")')
@@ -453,14 +472,26 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
     for label, first, last, weeks, total_col in blocks:
         if not weeks:
             continue
-        rng = f"{L(first)}3:{L(last)}{last_row}"
+        rng = f"{L(first)}3:{L(last)}{last_dest_row}"
         formula = f"AND(ISNUMBER({L(first)}3),ISNUMBER($G3),$G3>0,{L(first)}3>$G3)"
         ms.conditional_formatting.add(rng, FormulaRule(formula=[formula], font=red_font))
 
-    for rng in ov.merged_cells.ranges:
-        if rng.min_row < 3 or rng.min_col not in (1, 2, 3) or rng.max_row > last_row:
-            continue
-        ms.merge_cells(start_row=rng.min_row, start_column=rng.min_col, end_row=rng.max_row, end_column=rng.max_col)
+    # merge Zone/Region/Sub cells over runs of consecutive dest rows sharing the same source merge
+    # (keyed by the source owning row, not the text, so two different blocks that happen to carry
+    # the same label - e.g. "DC TAG" in two regions - are never merged together)
+    for col, owner in ((1, zone_owner), (2, region_owner), (3, sub_owner)):
+        run_start, run_key = None, object()
+        dest_of_prev = None
+        for src_r in src_rows:
+            r = dest_of[src_r]
+            key = owner.get(src_r, src_r)
+            if key != run_key:
+                if run_start is not None and dest_of_prev > run_start:
+                    ms.merge_cells(start_row=run_start, start_column=col, end_row=dest_of_prev, end_column=col)
+                run_start, run_key = r, key
+            dest_of_prev = r
+        if run_start is not None and dest_of_prev > run_start:
+            ms.merge_cells(start_row=run_start, start_column=col, end_row=dest_of_prev, end_column=col)
 
     ms.freeze_panes = "A5"
     ms.sheet_view.showGridLines = False
@@ -545,10 +576,11 @@ def generate_report(osr_bytes, template_bytes, as_of=None, prev_report_bytes=Non
         build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_after=prev_sheet)
         prev_sheet = sheet_name
 
-    # --- region sheets: stamp the generation date into the title band
-    for sheet_name in REGION_SHEETS:
-        if sheet_name in wb.sheetnames:
-            wb[sheet_name]["A1"] = f"Order Vs Week Distribution - Generated on {as_of:%d/%m/%Y}"
+    # --- region sheets: same month + week wise, grouped format, filtered to each region (Order Qty basis)
+    for sheet_name, region_filter in REGION_SHEETS:
+        build_month_sheet(wb, ov, sheet_name, "Z", cur_mon, as_of, insert_after=prev_sheet,
+                           region_filter=region_filter)
+        prev_sheet = sheet_name
 
     # --- estimate for the app (same arithmetic as the formulas)
     wv = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=True)
