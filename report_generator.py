@@ -55,7 +55,7 @@ REGION_SHEETS = [                       # (sheet name, Region values from OVW co
     ("USA", {"USA"}),
 ]
 # sheets where PERFECTA ENV / C250 AF / MD20 ENV's Week & Month Capacity are shown as one summed figure
-MERGE_CAPACITY_SHEETS = {"PENDING PROD", "AFR"}
+MERGE_CAPACITY_SHEETS = {"PENDING PROD", "AFR", "ORDER QTY"}
 MERGE_CAPACITY_GROUP = ("PERFECTA ENV", "C250 AF", "MD20 ENV")
 
 # Spellings that are accepted in MC ROUTING but are not offered in the dropdown
