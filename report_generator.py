@@ -54,6 +54,9 @@ REGION_SHEETS = [                       # (sheet name, Region values from OVW co
     ("AUS&EU", {"AUSTRALIA", "EUROPE"}),
     ("USA", {"USA"}),
 ]
+# sheets where PERFECTA ENV / C250 AF / MD20 ENV's Week & Month Capacity are shown as one summed figure
+MERGE_CAPACITY_SHEETS = {"PENDING PROD", "AFR"}
+MERGE_CAPACITY_GROUP = ("PERFECTA ENV", "C250 AF", "MD20 ENV")
 
 # Spellings that are accepted in MC ROUTING but are not offered in the dropdown
 ROUTE_ALIASES = {"CONSTANTA TAG D", "MD 20 4GM", "PEARL PACK PREMIX"}
@@ -346,12 +349,14 @@ def _apply(cell, st):
 
 
 def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_after=OVW, n_months=N_MONTH_WINDOW,
-                       region_filter=None):
+                       region_filter=None, merge_capacity_group=None):
     """(Re)build a month + week wise sheet, grouped by month, summed from WORKING's basis_col
     (containers), mirroring every line from the hidden ORDER VS WEEK DISTRIBUTION sheet.
     region_filter, if given, is a set of Region values (OVW column B) to include, keeping each
     matched block's internal row order but dropping everything else (used for the AFR/AUS&EU/USA
-    sheets)."""
+    sheets). merge_capacity_group, if given, is a tuple of Machine Line names that - when they
+    land on consecutive rows - get their Week/Month Capacity cells merged into a single summed
+    figure instead of being shown one per line."""
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     insert_at = wb.sheetnames.index(insert_after) + 1
@@ -429,11 +434,14 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
         _apply(ms.cell(2, total_col, abbrev), st_colhdr_wk)
 
     total_re = re.compile(r"=SUM\(([A-Z]+)(\d+):\1(\d+)\)")
+    line_dest_row = {}
 
     for src_r in src_rows:
         r = dest_of[src_r]
         label = ov.cell(src_r, 4).value
         is_total = label == "TOTAL"
+        if label not in NON_LINE_LABELS:
+            line_dest_row[label] = r
         zo, ro, so = zone_owner.get(src_r, src_r), region_owner.get(src_r, src_r), sub_owner.get(src_r, src_r)
         _apply(ms.cell(r, 1, f"=IF('{OVW}'!A{zo}=\"\",\"\",'{OVW}'!A{zo})"), st_total_oth if is_total else st_zone)
         _apply(ms.cell(r, 2, f"=IF('{OVW}'!B{ro}=\"\",\"\",'{OVW}'!B{ro})"), st_total_oth if is_total else st_region)
@@ -470,6 +478,19 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
                 _apply(ms.cell(r, total_col, f"=SUM({L(first)}{r}:{L(last)}{r})"), tot_st)
             else:
                 _apply(ms.cell(r, total_col, 0), tot_st)
+
+    if merge_capacity_group and all(name in line_dest_row for name in merge_capacity_group):
+        rows = sorted(line_dest_row[name] for name in merge_capacity_group)
+        if rows == list(range(rows[0], rows[0] + len(rows))):          # only merge if they're consecutive
+            r1, r2 = rows[0], rows[-1]
+            terms = "+".join(f"IFERROR(ROUND(VLOOKUP($D{rr},'{MC_MASTER}'!$A:$R,18,0)*$E{rr}*$F{rr},3),0)"
+                              for rr in rows)
+            _apply(ms.cell(r1, 7, f"={terms}"), st_cap)
+            for rr in rows[1:]:
+                ms.cell(rr, 7).value = None
+                ms.cell(rr, COL_CAP_MONTHLY).value = None
+            ms.merge_cells(start_row=r1, start_column=7, end_row=r2, end_column=7)
+            ms.merge_cells(start_row=r1, start_column=COL_CAP_MONTHLY, end_row=r2, end_column=COL_CAP_MONTHLY)
 
     col_widths = {1: 8, 2: 9.8, 3: 9, 4: 13.8, 5: 6.4, 6: 7, 7: 11.4, COL_CAP_MONTHLY: 9}
     for c, w in col_widths.items():
@@ -588,13 +609,16 @@ def generate_report(osr_bytes, template_bytes, as_of=None, prev_report_bytes=Non
     # --- MONTH WISE sheets: rolling N-month window, rebuilt fresh every run
     prev_sheet = OVW
     for sheet_name, basis_col in MONTH_SHEETS:
-        build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_after=prev_sheet)
+        mcg = MERGE_CAPACITY_GROUP if sheet_name in MERGE_CAPACITY_SHEETS else None
+        build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_after=prev_sheet,
+                           merge_capacity_group=mcg)
         prev_sheet = sheet_name
 
     # --- region sheets: same month + week wise, grouped format, filtered to each region (Order Qty basis)
     for sheet_name, region_filter in REGION_SHEETS:
+        mcg = MERGE_CAPACITY_GROUP if sheet_name in MERGE_CAPACITY_SHEETS else None
         build_month_sheet(wb, ov, sheet_name, "Z", cur_mon, as_of, insert_after=prev_sheet,
-                           region_filter=region_filter)
+                           region_filter=region_filter, merge_capacity_group=mcg)
         prev_sheet = sheet_name
 
     # --- estimate for the app (same arithmetic as the formulas)
