@@ -56,7 +56,10 @@ REGION_SHEETS = [                       # (sheet name, Region values from OVW co
 ]
 # sheets where PERFECTA ENV / C250 AF / MD20 ENV's Week & Month Capacity are shown as one summed figure
 MERGE_CAPACITY_SHEETS = {"PENDING PROD", "AFR", "ORDER QTY"}
-MERGE_CAPACITY_GROUP = ("PERFECTA ENV", "C250 AF", "MD20 ENV")
+MERGE_CAPACITY_GROUP = ("PERFECTA ENV(Black Tea)", "C250 AF(Black Tea)", "MD20 ENV(Black Tea)")
+
+# per-sheet freeze-pane cell for the month+week sheets (matches each sheet's manual formatting)
+FREEZE_PANES = {"ORDER QTY": "H3", "PENDING PROD": "G3", "AFR": "K3", "AUS&EU": "G3", "USA": "K3"}
 
 # Spellings that are accepted in MC ROUTING but are not offered in the dropdown
 ROUTE_ALIASES = {"CONSTANTA TAG D", "MD 20 4GM", "PEARL PACK PREMIX"}
@@ -262,7 +265,7 @@ def build_working(wb, osr_rows, routes, table):
         ww.cell(r, 23, f"=MAX($V{r},{wk0})").number_format = "dd-mmm-yy"
         base_group = f"IFERROR(VLOOKUP($J{r},'{OVW}'!$AH:$AI,2,0),\"\")"
         ww.cell(r, 24, (
-            f'=IF(AND({base_group}="CONSTANTA ENV",'
+            f'=IF(AND({base_group}="CONSTANTA ENV(Flavour Tea)",'
             f'OR(ISNUMBER(SEARCH("KHAIMA",$I{r})),ISNUMBER(SEARCH("CRANBERRY",$I{r})))),'
             f'"CONSTANTA ENV (HERBAL)",{base_group})'))
         ic = f"VLOOKUP($I{r},'{ITEM_CFC}'!$A:$B,2,0)"
@@ -294,7 +297,7 @@ def estimate_containers(osr_rows, routes, table, item_cfc, line_cfc, cur_mon, n_
         group = group_of.get(str(route).upper()) if route else None
         if not group:
             continue
-        if group == "CONSTANTA ENV" and ("KHAIMA" in str(pname).upper() or "CRANBERRY" in str(pname).upper()):
+        if group == "CONSTANTA ENV(Flavour Tea)" and ("KHAIMA" in str(pname).upper() or "CRANBERRY" in str(pname).upper()):
             group = "CONSTANTA ENV (HERBAL)"
         per = item_cfc.get(str(pname).upper()) or line_cfc.get(group)
         if not per:
@@ -501,6 +504,7 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
                 ms.cell(rr, COL_CAP_MONTHLY).value = None
             ms.merge_cells(start_row=r1, start_column=7, end_row=r2, end_column=7)
             ms.merge_cells(start_row=r1, start_column=COL_CAP_MONTHLY, end_row=r2, end_column=COL_CAP_MONTHLY)
+            merged_cols = [7, COL_CAP_MONTHLY]
 
             for label_, first, last, weeks, total_col in blocks:
                 for i, (wn, wmon) in enumerate(weeks):
@@ -513,11 +517,19 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
                     for rr in rows[1:]:
                         ms.cell(rr, c).value = None
                     ms.merge_cells(start_row=r1, start_column=c, end_row=r2, end_column=c)
+                    merged_cols.append(c)
                 if weeks:
                     _apply(ms.cell(r1, total_col, f"=SUM({L(first)}{r1}:{L(last)}{r1})"), st_week)
                 for rr in rows[1:]:
                     ms.cell(rr, total_col).value = None
                 ms.merge_cells(start_row=r1, start_column=total_col, end_row=r2, end_column=total_col)
+                merged_cols.append(total_col)
+
+            for c in merged_cols:                                       # vertically center the merged value
+                cell = ms.cell(r1, c)
+                a = cell.alignment
+                cell.alignment = Alignment(horizontal=a.horizontal, vertical="center", textRotation=a.textRotation,
+                                            wrapText=a.wrapText, shrinkToFit=a.shrinkToFit, indent=a.indent)
 
     col_widths = {1: 8, 2: 9.8, 3: 9, 4: 13.8, 5: 6.4, 6: 7, 7: 11.4, COL_CAP_MONTHLY: 9}
     for c, w in col_widths.items():
@@ -556,7 +568,7 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
         if run_start is not None and dest_of_prev > run_start:
             ms.merge_cells(start_row=run_start, start_column=col, end_row=dest_of_prev, end_column=col)
 
-    ms.freeze_panes = "A5"
+    ms.freeze_panes = FREEZE_PANES.get(sheet_name, "A5")
     ms.sheet_view.showGridLines = False
     ms.row_dimensions[1].height = 15
     ms.row_dimensions[2].height = 41.4
