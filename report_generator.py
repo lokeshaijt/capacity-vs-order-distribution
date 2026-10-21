@@ -492,6 +492,23 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
             ms.merge_cells(start_row=r1, start_column=7, end_row=r2, end_column=7)
             ms.merge_cells(start_row=r1, start_column=COL_CAP_MONTHLY, end_row=r2, end_column=COL_CAP_MONTHLY)
 
+            for label_, first, last, weeks, total_col in blocks:
+                for i, (wn, wmon) in enumerate(weeks):
+                    c = first + i
+                    terms_wk = "+".join(
+                        f'IFERROR(SUMIFS(WORKING!${basis_col}:${basis_col},WORKING!$X:$X,$D{rr},'
+                        f'WORKING!$W:$W,DATE({wmon.year},{wmon.month},{wmon.day})),0)'
+                        for rr in rows)
+                    _apply(ms.cell(r1, c, f"={terms_wk}"), st_week)
+                    for rr in rows[1:]:
+                        ms.cell(rr, c).value = None
+                    ms.merge_cells(start_row=r1, start_column=c, end_row=r2, end_column=c)
+                if weeks:
+                    _apply(ms.cell(r1, total_col, f"=SUM({L(first)}{r1}:{L(last)}{r1})"), st_week)
+                for rr in rows[1:]:
+                    ms.cell(rr, total_col).value = None
+                ms.merge_cells(start_row=r1, start_column=total_col, end_row=r2, end_column=total_col)
+
     col_widths = {1: 8, 2: 9.8, 3: 9, 4: 13.8, 5: 6.4, 6: 7, 7: 11.4, COL_CAP_MONTHLY: 9}
     for c, w in col_widths.items():
         ms.column_dimensions[L(c)].width = w
