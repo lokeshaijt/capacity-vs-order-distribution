@@ -480,12 +480,14 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
             if weeks:
                 if label == "Excess Order":
                     tr = r - 1
-                    tot_formula = (f'=IFERROR(IF(ROUND({L(total_col)}{tr}-$H{tr},3)>0,'
-                                    f'ROUND({L(total_col)}{tr}-$H{tr},3),""),"")')
+                    mcap = f"$G{tr}*{len(weeks)}"
+                    tot_formula = (f'=IFERROR(IF(ROUND({L(total_col)}{tr}-{mcap},3)>0,'
+                                    f'ROUND({L(total_col)}{tr}-{mcap},3),""),"")')
                 elif label == "Short Order":
                     tr = r - 2
-                    tot_formula = (f'=IFERROR(IF(ROUND($H{tr}-{L(total_col)}{tr},3)>0,'
-                                    f'ROUND($H{tr}-{L(total_col)}{tr},3),""),"")')
+                    mcap = f"$G{tr}*{len(weeks)}"
+                    tot_formula = (f'=IFERROR(IF(ROUND({mcap}-{L(total_col)}{tr},3)>0,'
+                                    f'ROUND({mcap}-{L(total_col)}{tr},3),""),"")')
                 else:
                     tot_formula = f"=SUM({L(first)}{r}:{L(last)}{r})"
                 _apply(ms.cell(r, total_col, tot_formula), tot_st)
