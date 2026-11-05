@@ -342,6 +342,23 @@ def month_window(cur_mon, n_months=N_MONTH_WINDOW):
             for yy, mm in month_keys]
 
 
+def week_month_split_sumifs(block_label, wmon):
+    """For a week that spans two months, return an extra SUMIFS criteria fragment restricting
+    this block's copy of the week to just the days that actually fall in block_label's month -
+    so the same week can show under both months without any single order being double-counted.
+    Returns "" for a week that doesn't cross a month boundary."""
+    block_dt = datetime.datetime.strptime(block_label.title(), "%B %Y")
+    block_year, block_month = block_dt.year, block_dt.month
+    week_end = wmon + datetime.timedelta(days=6)
+    if (wmon.month, wmon.year) == (block_month, block_year) and (week_end.month, week_end.year) == (block_month, block_year):
+        return ""
+    if (wmon.month, wmon.year) == (block_month, block_year):
+        cutoff = datetime.date(week_end.year, week_end.month, 1)            # this block is the earlier month of the split
+        return f',WORKING!$D:$D,"<"&DATE({cutoff.year},{cutoff.month},{cutoff.day})'
+    cutoff = datetime.date(block_year, block_month, 1)                      # this block is the later month of the split
+    return f',WORKING!$D:$D,">="&DATE({cutoff.year},{cutoff.month},{cutoff.day})'
+
+
 def _style_of(cell, size=None):
     font = copy.copy(cell.font)
     if size is not None:
@@ -476,8 +493,9 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
                     formula = f'=IFERROR(IF(ROUND($G{tr}-{L(c)}{tr},3)>0,ROUND($G{tr}-{L(c)}{tr},3),""),"")'
                     st = _style_of(ov.cell(src_r, FIRST_WEEK_COL), size=10)
                 else:
+                    split = week_month_split_sumifs(label_, wmon)
                     formula = (f'=IFERROR(SUMIFS(WORKING!${basis_col}:${basis_col},WORKING!$X:$X,$D{r},'
-                               f'WORKING!$W:$W,DATE({wmon.year},{wmon.month},{wmon.day})),"")')
+                               f'WORKING!$W:$W,DATE({wmon.year},{wmon.month},{wmon.day}){split}),"")')
                     st = st_week
                 _apply(ms.cell(r, c, formula), st)
             tot_st = st_total_wk if is_total else st_week
@@ -515,9 +533,10 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
             for label_, first, last, weeks, total_col in blocks:
                 for i, (wn, wmon) in enumerate(weeks):
                     c = first + i
+                    split = week_month_split_sumifs(label_, wmon)
                     terms_wk = "+".join(
                         f'IFERROR(SUMIFS(WORKING!${basis_col}:${basis_col},WORKING!$X:$X,$D{rr},'
-                        f'WORKING!$W:$W,DATE({wmon.year},{wmon.month},{wmon.day})),0)'
+                        f'WORKING!$W:$W,DATE({wmon.year},{wmon.month},{wmon.day}){split}),0)'
                         for rr in rows)
                     _apply(ms.cell(r1, c, f"={terms_wk}"), st_week)
                     for rr in rows[1:]:
