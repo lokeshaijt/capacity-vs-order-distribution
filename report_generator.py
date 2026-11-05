@@ -316,26 +316,33 @@ def estimate_containers(osr_rows, routes, table, item_cfc, line_cfc, cur_mon, n_
 
 def month_window(cur_mon, n_months=N_MONTH_WINDOW):
     """[(label, [(week_num, monday_date), ...]), ...] for n_months starting at the current month.
-    A week belongs to the month holding its Monday; a part-elapsed current month only lists the
-    weeks from today's week onward (e.g. "October" on 14 Oct 2026 lists weeks 42, 43, 44 only)."""
-    months = []
+    A week belongs to whichever month holds the majority of its 7 days (so a week like
+    30-Nov..06-Dec, with only 1 day in November, groups under December); a part-elapsed current
+    month only lists the weeks from today's week onward (e.g. "October" on 14 Oct 2026 lists
+    weeks 42, 43, 44 only)."""
     y, m = cur_mon.year, cur_mon.month
+    month_keys = []
     for i in range(n_months):
         mm = (m - 1 + i) % 12 + 1
         yy = y + (m - 1 + i) // 12
-        start = datetime.date(yy, mm, 1)
-        end = datetime.date(yy + 1, 1, 1) if mm == 12 else datetime.date(yy, mm + 1, 1)
-        seen, weeks = set(), []
-        d = start
-        while d < end:
-            mon = monday_of(d)
-            if mon not in seen and mon >= cur_mon and mon.month == mm and mon.year == yy:
-                seen.add(mon)
-                weeks.append((weeknum(mon), mon))
-            d += datetime.timedelta(days=1)
-        weeks.sort(key=lambda t: t[1])
-        months.append((start.strftime("%B %Y").upper(), weeks))
-    return months
+        month_keys.append((yy, mm))
+    weeks_by_month = {k: [] for k in month_keys}
+
+    last_yy, last_mm = month_keys[-1]
+    last_end = datetime.date(last_yy + 1, 1, 1) if last_mm == 12 else datetime.date(last_yy, last_mm + 1, 1)
+    mon = cur_mon
+    while mon < last_end:
+        counts = {}
+        for i in range(7):
+            key = ((mon + datetime.timedelta(days=i)).year, (mon + datetime.timedelta(days=i)).month)
+            counts[key] = counts.get(key, 0) + 1
+        majority_key = max(counts, key=lambda k: counts[k])
+        if majority_key in weeks_by_month:
+            weeks_by_month[majority_key].append((weeknum(mon), mon))
+        mon += datetime.timedelta(days=7)
+
+    return [(datetime.date(yy, mm, 1).strftime("%B %Y").upper(), sorted(weeks_by_month[(yy, mm)], key=lambda t: t[1]))
+            for yy, mm in month_keys]
 
 
 def _style_of(cell, size=None):
@@ -421,7 +428,7 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
         _apply(ms.cell(1, c), st_title)
     for label, first, last, weeks, total_col in blocks:
         ms.merge_cells(start_row=1, start_column=first, end_row=1, end_column=total_col)
-        abbrev = weeks[0][1].strftime("%b").upper() if weeks else label[:3]
+        abbrev = label[:3]
         _apply(ms.cell(1, first, abbrev), st_band)
         for c in range(first, total_col + 1):
             _apply(ms.cell(1, c), st_band)
@@ -433,7 +440,7 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
     for label, first, last, weeks, total_col in blocks:
         for i, (wn, wmon) in enumerate(weeks):
             _apply(ms.cell(2, first + i, f"W #{week_of_year(wmon)}"), st_colhdr_wk)
-        abbrev = weeks[0][1].strftime("%b").upper() if weeks else label[:3]
+        abbrev = label[:3]
         _apply(ms.cell(2, total_col, abbrev), st_colhdr_wk)
 
     total_re = re.compile(r"=SUM\(([A-Z]+)(\d+):\1(\d+)\)")
