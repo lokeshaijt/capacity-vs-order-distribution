@@ -316,10 +316,10 @@ def estimate_containers(osr_rows, routes, table, item_cfc, line_cfc, cur_mon, n_
 
 def month_window(cur_mon, n_months=N_MONTH_WINDOW):
     """[(label, [(week_num, monday_date), ...]), ...] for n_months starting at the current month.
-    A week belongs to whichever month holds the majority of its 7 days (so a week like
-    30-Nov..06-Dec, with only 1 day in November, groups under December); a part-elapsed current
-    month only lists the weeks from today's week onward (e.g. "October" on 14 Oct 2026 lists
-    weeks 42, 43, 44 only)."""
+    A week that spans two months (e.g. 30-Nov..06-Dec) appears under BOTH months it touches - once
+    as a column in November's block, once in December's - rather than being assigned to just one;
+    a part-elapsed current month only lists the weeks from today's week onward (e.g. "October" on
+    14 Oct 2026 lists weeks 42, 43, 44 only)."""
     y, m = cur_mon.year, cur_mon.month
     month_keys = []
     for i in range(n_months):
@@ -332,13 +332,10 @@ def month_window(cur_mon, n_months=N_MONTH_WINDOW):
     last_end = datetime.date(last_yy + 1, 1, 1) if last_mm == 12 else datetime.date(last_yy, last_mm + 1, 1)
     mon = cur_mon
     while mon < last_end:
-        counts = {}
-        for i in range(7):
-            key = ((mon + datetime.timedelta(days=i)).year, (mon + datetime.timedelta(days=i)).month)
-            counts[key] = counts.get(key, 0) + 1
-        majority_key = max(counts, key=lambda k: counts[k])
-        if majority_key in weeks_by_month:
-            weeks_by_month[majority_key].append((weeknum(mon), mon))
+        touched = {((mon + datetime.timedelta(days=i)).year, (mon + datetime.timedelta(days=i)).month) for i in range(7)}
+        for key in touched:
+            if key in weeks_by_month:
+                weeks_by_month[key].append((weeknum(mon), mon))
         mon += datetime.timedelta(days=7)
 
     return [(datetime.date(yy, mm, 1).strftime("%B %Y").upper(), sorted(weeks_by_month[(yy, mm)], key=lambda t: t[1]))
