@@ -474,7 +474,7 @@ def build_month_sheet(wb, ov, sheet_name, basis_col, cur_mon, as_of, insert_afte
         _apply(ms.cell(r, 5, f"=IF('{OVW}'!E{src_r}=\"\",\"\",'{OVW}'!E{src_r})"), st_total_oth if is_total else st_mach)
         _apply(ms.cell(r, 6, f"=IF('{OVW}'!F{src_r}=\"\",\"\",'{OVW}'!F{src_r})"), st_total_oth if is_total else st_shift)
         _apply(ms.cell(r, 7, f"=IF('{OVW}'!G{src_r}=\"\",\"\",'{OVW}'!G{src_r})"), st_total_cap if is_total else st_cap)
-        _apply(ms.cell(r, COL_CAP_MONTHLY, f'=IF(ISNUMBER($G{r}),$G{r}*4,$G{r})'),
+        _apply(ms.cell(r, COL_CAP_MONTHLY, f'=IF(ISNUMBER($G{r}),$G{r}/6*26,$G{r})'),
                st_total_cap if is_total else st_cap)
 
         for label_, first, last, weeks, total_col in blocks:
